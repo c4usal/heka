@@ -12,7 +12,11 @@ struct ExecutionRequest { data_directory: Option<String>, output_path: Option<St
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ExecutionResult { layer_name: String, geojson: String, output_path: String, feature_count: i64, elapsed_ms: f64, warnings: Vec<String> }
+struct MapLayer { id: String, name: String, kind: String, geojson: String, feature_count: i64, output_path: String }
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecutionResult { layer_name: String, geojson: String, output_path: String, feature_count: i64, elapsed_ms: f64, warnings: Vec<String>, #[serde(default)] map_layers: Vec<MapLayer> }
 
 #[derive(Deserialize)]
 struct WorkerEnvelope { r#type: String, payload: serde_json::Value }

@@ -64,6 +64,24 @@ def setup_qgis() -> None:
         native_provider = QgsNativeAlgorithms()
         qgis_application.processingRegistry().addProvider(native_provider)
 
+def export_map_layer(layer: Any, layer_id: str, name: str, kind: str, output_dir: Path, work_dir: Path) -> dict[str, Any]:
+    """Export every display layer from QGIS itself in WGS84 for Cesium.
+
+    Keeping this conversion in the worker makes the viewer a faithful rendering of
+    the processing outputs rather than a second implementation of spatial logic.
+    """
+    import processing
+    from qgis.core import QgsVectorLayer
+    display = processing.run("native:reprojectlayer", {
+        "INPUT": layer, "TARGET_CRS": "EPSG:4326", "OUTPUT": str(work_dir / f"{layer_id}_wgs84.gpkg")
+    })["OUTPUT"]
+    path = output_dir / f"{layer_id}.geojson"
+    exported = processing.run("native:savefeatures", {"INPUT": display, "OUTPUT": str(path)})["OUTPUT"]
+    verified = QgsVectorLayer(exported, name, "ogr")
+    if not verified.isValid():
+        raise RuntimeError(f"QGIS could not open the exported {name} map layer.")
+    return {"id": layer_id, "name": name, "kind": kind, "geojson": path.read_text(encoding="utf-8"), "featureCount": verified.featureCount(), "outputPath": str(path)}
+
 def run_fire_station_analysis(message: dict[str, Any]) -> dict[str, Any]:
     try:
         setup_qgis()
@@ -92,15 +110,22 @@ def run_fire_station_analysis(message: dict[str, Any]) -> dict[str, Any]:
     progress("candidate-generation", 86, "Generating candidate station points from coverage gaps")
     candidates = processing.run("native:centroids", {"INPUT": scored, "ALL_PARTS": False, "OUTPUT": str(work_dir / "candidates.gpkg")})["OUTPUT"]
     ranked = processing.run("native:addautoincrementalfield", {"INPUT": candidates, "FIELD_NAME": "rank", "START": 1, "MODULUS": 0, "GROUP_FIELDS": [], "SORT_EXPRESSION": '"coverage_gap_m2"', "SORT_ASCENDING": False, "SORT_NULLS_FIRST": False, "OUTPUT": str(work_dir / "ranked_candidates.gpkg")})["OUTPUT"]
-    progress("export", 94, "Exporting ranked candidate locations as GeoJSON")
+    progress("export", 94, "Exporting QGIS display layers as WGS84 GeoJSON")
     output_path = Path(message.get("outputPath") or data_dir.parent / "exports" / "fire_station_candidates.geojson"); output_path.parent.mkdir(parents=True, exist_ok=True)
-    display_layer = processing.run("native:reprojectlayer", {"INPUT": ranked, "TARGET_CRS": "EPSG:4326", "OUTPUT": str(work_dir / "candidates_wgs84.gpkg")})["OUTPUT"]
-    exported = processing.run("native:savefeatures", {"INPUT": display_layer, "OUTPUT": str(output_path)})["OUTPUT"]
-    result_layer = QgsVectorLayer(exported, "Ranked fire station candidates", "ogr")
-    if not result_layer.isValid(): raise RuntimeError("QGIS could not open the exported result layer.")
-    feature_count = result_layer.featureCount(); geojson = output_path.read_text(encoding="utf-8")
+    output_dir = output_path.parent
+    # Each item is a direct QGIS output: no geometry is altered in the frontend.
+    map_layers = [
+        export_map_layer(stations_projected, "fire_stations", "Existing fire stations", "stations", output_dir, work_dir),
+        export_map_layer(coverage, "fire_station_coverage", "Existing 5 km coverage", "coverage", output_dir, work_dir),
+        export_map_layer(scored, "coverage_gaps", "Communities outside coverage", "gaps", output_dir, work_dir),
+        export_map_layer(ranked, "fire_station_candidates", "Ranked fire station candidates", "candidates", output_dir, work_dir),
+    ]
+    candidate_layer = map_layers[-1]
+    if output_path != Path(candidate_layer["outputPath"]):
+        output_path.write_text(candidate_layer["geojson"], encoding="utf-8")
+    feature_count = candidate_layer["featureCount"]; geojson = candidate_layer["geojson"]
     progress("complete", 100, f"Generated {feature_count} ranked candidate locations")
-    return {"layerName": "Ranked fire station candidates", "geojson": geojson, "outputPath": str(output_path), "featureCount": feature_count, "elapsedMs": round((time.perf_counter() - started) * 1000), "warnings": ["Coverage is a 5 km straight-line proxy, not a road-network travel-time model."]}
+    return {"layerName": "Ranked fire station candidates", "geojson": geojson, "outputPath": str(output_path), "featureCount": feature_count, "elapsedMs": round((time.perf_counter() - started) * 1000), "warnings": ["Coverage is a 5 km straight-line proxy, not a road-network travel-time model."], "mapLayers": map_layers}
 
 def handle(message: dict[str, Any]) -> None:
     try:
