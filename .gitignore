@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+src-tauri/target/
+src-tauri/gen/
+__pycache__/
+*.py[cod]
+.env
+.DS_Store

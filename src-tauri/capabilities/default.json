@@ -1,0 +1,1 @@
+{"$schema":"../gen/schemas/desktop-schema.json","identifier":"default","description":"Core desktop permissions","windows":["main"],"permissions":["core:default","dialog:default","fs:default"]}
