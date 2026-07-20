@@ -15,9 +15,13 @@ from pathlib import Path
 from typing import Any
 
 DATA_URLS = {
-    "fire_stations": "https://data.calgary.ca/resource/cqsb-2hhg.geojson?$limit=5000",
-    "communities": "https://data.calgary.ca/resource/surr-xmvs.geojson?$limit=5000",
+    # Official City of Calgary public feature layers. ArcGIS remains reachable when
+    # the City's Socrata endpoint rate-limits or rejects desktop-worker requests.
+    "fire_stations": "https://services1.arcgis.com/AVP60cs0Q9PEA8rH/arcgis/rest/services/Fire_Stations/FeatureServer/0/query?where=1%3D1&outFields=*&returnGeometry=true&f=geojson",
+    "communities": "https://services1.arcgis.com/AVP60cs0Q9PEA8rH/arcgis/rest/services/Community_Districts/FeatureServer/0/query?where=1%3D1&outFields=*&returnGeometry=true&f=geojson",
 }
+native_provider: Any | None = None
+qgis_application: Any | None = None
 
 def emit(kind: str, payload: dict[str, Any]) -> None:
     print(json.dumps({"type": kind, "payload": payload}), flush=True)
@@ -36,25 +40,35 @@ def bootstrap(data_dir: Path) -> dict[str, str]:
         target = data_dir / f"{name}.geojson"
         if not target.exists():
             progress("dataset-download", index * 10, f"Downloading Calgary {name.replace('_', ' ')}")
-            with urllib.request.urlopen(url, timeout=30) as response:
+            request = urllib.request.Request(url, headers={"User-Agent": "Heka-Spatial-Reasoning-IDE/0.1 (+https://github.com/c4usal/heka)", "Accept": "application/geo+json, application/json"})
+            with urllib.request.urlopen(request, timeout=30) as response:
                 target.write_bytes(response.read())
         paths[name] = str(target)
     return paths
 
 def setup_qgis() -> None:
+    global native_provider, qgis_application
     prefix = os.environ.get("QGIS_PREFIX_PATH", r"C:\OSGeo4W\apps\qgis-ltr")
+    plugin_path = str(Path(prefix) / "python" / "plugins")
+    if plugin_path not in sys.path:
+        sys.path.insert(0, plugin_path)
     from qgis.core import QgsApplication
     from qgis.analysis import QgsNativeAlgorithms
+    from processing.core.Processing import Processing
     QgsApplication.setPrefixPath(prefix, True)
-    app = QgsApplication.instance() or QgsApplication([], False)
-    app.initQgis()
-    app.processingRegistry().addProvider(QgsNativeAlgorithms())
+    if qgis_application is None:
+        qgis_application = QgsApplication.instance() or QgsApplication([], False)
+        qgis_application.initQgis()
+    Processing.initialize()
+    if native_provider is None:
+        native_provider = QgsNativeAlgorithms()
+        qgis_application.processingRegistry().addProvider(native_provider)
 
 def run_fire_station_analysis(message: dict[str, Any]) -> dict[str, Any]:
     try:
         setup_qgis()
+        from qgis.core import QgsVectorLayer
         import processing
-        from qgis.core import QgsVectorLayer, QgsVectorFileWriter, QgsCoordinateTransformContext
     except Exception as error:
         raise RuntimeError(f"PyQGIS is unavailable. Install QGIS LTR and set QGIS_PREFIX_PATH if needed. ({error})") from error
 
@@ -77,12 +91,13 @@ def run_fire_station_analysis(message: dict[str, Any]) -> dict[str, Any]:
     scored = processing.run("native:fieldcalculator", {"INPUT": gaps, "FIELD_NAME": "coverage_gap_m2", "FIELD_TYPE": 0, "FIELD_LENGTH": 20, "FIELD_PRECISION": 2, "NEW_FIELD": True, "FORMULA": "$area", "OUTPUT": str(work_dir / "scored_gaps.gpkg")})["OUTPUT"]
     progress("candidate-generation", 86, "Generating candidate station points from coverage gaps")
     candidates = processing.run("native:centroids", {"INPUT": scored, "ALL_PARTS": False, "OUTPUT": str(work_dir / "candidates.gpkg")})["OUTPUT"]
-    ranked = processing.run("native:fieldcalculator", {"INPUT": candidates, "FIELD_NAME": "rank", "FIELD_TYPE": 1, "FIELD_LENGTH": 5, "FIELD_PRECISION": 0, "NEW_FIELD": True, "FORMULA": 'row_number(order_by:="coverage_gap_m2", ascending:=false)', "OUTPUT": str(work_dir / "ranked_candidates.gpkg")})["OUTPUT"]
+    ranked = processing.run("native:addautoincrementalfield", {"INPUT": candidates, "FIELD_NAME": "rank", "START": 1, "MODULUS": 0, "GROUP_FIELDS": [], "SORT_EXPRESSION": '"coverage_gap_m2"', "SORT_ASCENDING": False, "SORT_NULLS_FIRST": False, "OUTPUT": str(work_dir / "ranked_candidates.gpkg")})["OUTPUT"]
     progress("export", 94, "Exporting ranked candidate locations as GeoJSON")
     output_path = Path(message.get("outputPath") or data_dir.parent / "exports" / "fire_station_candidates.geojson"); output_path.parent.mkdir(parents=True, exist_ok=True)
-    result_layer = QgsVectorLayer(ranked, "Ranked fire station candidates", "ogr")
-    error_code, error_message, *_ = QgsVectorFileWriter.writeAsVectorFormatV3(result_layer, str(output_path), QgsCoordinateTransformContext(), QgsVectorFileWriter.SaveVectorOptions())
-    if error_code != QgsVectorFileWriter.NoError: raise RuntimeError(f"QGIS could not export the result layer: {error_message}")
+    display_layer = processing.run("native:reprojectlayer", {"INPUT": ranked, "TARGET_CRS": "EPSG:4326", "OUTPUT": str(work_dir / "candidates_wgs84.gpkg")})["OUTPUT"]
+    exported = processing.run("native:savefeatures", {"INPUT": display_layer, "OUTPUT": str(output_path)})["OUTPUT"]
+    result_layer = QgsVectorLayer(exported, "Ranked fire station candidates", "ogr")
+    if not result_layer.isValid(): raise RuntimeError("QGIS could not open the exported result layer.")
     feature_count = result_layer.featureCount(); geojson = output_path.read_text(encoding="utf-8")
     progress("complete", 100, f"Generated {feature_count} ranked candidate locations")
     return {"layerName": "Ranked fire station candidates", "geojson": geojson, "outputPath": str(output_path), "featureCount": feature_count, "elapsedMs": round((time.perf_counter() - started) * 1000), "warnings": ["Coverage is a 5 km straight-line proxy, not a road-network travel-time model."]}
