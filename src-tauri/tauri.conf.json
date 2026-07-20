@@ -5,5 +5,5 @@
   "identifier": "com.heka.spatialreasoning",
   "build": { "beforeDevCommand": "npm run dev", "devUrl": "http://localhost:1420", "beforeBuildCommand": "npm run build", "frontendDist": "../dist" },
   "app": { "windows": [{ "title": "Heka — Spatial Reasoning IDE", "width": 1440, "height": 900, "minWidth": 1100, "minHeight": 700 }], "security": { "csp": null } },
-  "bundle": { "active": true, "targets": "all" }
+  "bundle": { "active": true, "targets": "all", "resources": ["../worker/heka_worker.py"] }
 }

@@ -10,5 +10,7 @@ export interface SpatialDslStep { id: string; operation: string; label: string; 
 export interface PlannerPlan { question: string; objective: string; location: string | null; geographicScope: string; requiredDatasets: Array<{ name: string; purpose: string; kind: string }>; constraints: Array<{ label: string; value: string; source: "user" | "planner" }>; assumptions: string[]; desiredOutput: string; workflowSummary: string; confidence: number; clarificationQuestions: string[]; graph: { nodes: GraphNode[]; edges: GraphEdge[] }; dsl: SpatialDslStep[]; }
 export interface PlannerState { status: "idle" | "ready" | "planning" | "complete" | "error"; notes: string[]; plan?: PlannerPlan; error?: string; }
 export interface RuntimeState { status: "offline" | "ready" | "running"; backend: string; }
+export interface ExecutionResult { layerName: string; geojson: string; outputPath: string; featureCount: number; elapsedMs: number; warnings: string[]; }
+export interface ExecutionState { status: "idle" | "running" | "complete" | "error"; stage?: string; progress: number; detail?: string; result?: ExecutionResult; error?: string; }
 export interface PanelLayout { left: number; center: number; right: number; bottom: number; }
 export interface Workspace { activeProject: Project; activeSection: NavigationSection; layout: PanelLayout; isSidebarCollapsed: boolean; }
