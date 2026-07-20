@@ -1,99 +1,64 @@
 # Heka
 
-> **Ask Earth.**
+> Ask Earth.
 
-Heka is an AI geospatial analyst that turns natural-language questions into professional spatial analysis and interactive maps.
+Heka is a desktop Spatial Reasoning IDE. It turns natural-language questions into explainable, reproducible geospatial workflows executed by professional GIS engines.
 
-## The idea
+## The product
 
-Spatial questions that matter should not require someone to learn GIS software, hunt for plugins, repair coordinate systems, and manually stitch together an analysis. Heka lets people ask the question directly, then makes the reasoning visible.
+People should not need to learn GIS tools, find plugins, repair coordinate systems, and assemble workflows before they can answer an important question about a place. Heka lets them state the objective, then makes the analysis and its evidence inspectable.
 
-**Instead of:** question → GIS software → data wrangling → many tools → exported map
+Heka is not an AI chatbot, QGIS wrapper, website, map viewer, or Python-code generator. It is a persistent desktop environment for reasoning about the physical world.
 
-**Heka:** question → AI-built spatial workflow → GIS engine → interactive, evidence-backed answer
+## Experience
 
-Heka is not positioned as “AI for GIS.” It is a natural-language interface for spatial reasoning: a way to ask meaningful questions about cities, infrastructure, emergency response, climate risk, food access, mobility, and the physical world.
+Start with a question:
 
-## The experience
+- Where should Calgary place another fire station?
+- Which neighbourhoods are underserved by hospitals?
+- Which bridges would isolate communities if they failed?
+- Which sites are suitable for EV chargers?
 
-The homepage is deliberately simple: a beautiful globe and one prompt.
+Heka identifies relevant datasets, extracts constraints, constructs a workflow, validates it, runs it through a deterministic GIS backend, and returns an interactive map plus the evidence behind the result.
 
-> Ask Earth anything…
+The workspace includes:
 
-Example questions:
+- Project, dataset, layer, plugin, and history navigation
+- Interactive globe and map view
+- Reasoning Inspector for assumptions, constraints, provenance, workflow graph, and confidence
+- Replay Timeline for intent, dataset selection, workflow generation, validation, execution, visualization, and explanation
+- Local logs, exports, cache, and project data
 
-- Where is the best place for a new hospital?
-- If this bridge collapsed tomorrow, what communities become isolated?
-- Which neighborhoods are food deserts?
-- Where should drone hubs be built?
-- What land is suitable for affordable housing but outside flood risk?
-
-Rather than a generic “thinking” spinner, Heka shows an inspectable workflow being assembled and executed:
-
-1. Understanding request
-2. Detecting datasets
-3. Loading roads, facilities, population, and risk layers
-4. Running spatial operations
-5. Generating and ranking candidate locations
-6. Explaining the result and confidence
-
-The map comes alive layer-by-layer. A **Reasoning** panel explains why each recommendation was selected, including population served, travel time, risk, land availability, assumptions, and confidence. A **Workflow Replay** timeline lets users inspect each intermediate map and analysis stage.
-
-## The hackathon “holy-shit” moment
-
-A judge asks:
-
-> If this bridge collapsed tomorrow, what communities become isolated?
-
-Heka zooms to the location, displays the road graph and alternate routes, highlights affected population clusters, and reports an evidence-backed estimate of the impact plus possible mitigation projects.
-
-The point is not a dashboard. It is watching a spatial reasoning engine turn a real-world question into a defensible answer.
-
-## Technical approach
+## Architecture
 
 ```text
-React frontend
-  ↓
-MapLibre or Cesium visualization
-  ↓
-Backend planner powered by GPT-5.6
-  ↓
-Spatial workflow DSL
-  ↓
-GIS execution engine (PyQGIS, GDAL, optional PostGIS)
-  ↓
-Layers, metrics, and explanation returned to the map
+Natural language
+  -> Planner
+  -> Spatial Reasoning Graph
+  -> Backend-independent Spatial DSL
+  -> Validation and compiler
+  -> Spatial runtime
+  -> Backend adapter (initially PyQGIS)
+  -> Visualization and explanation
 ```
 
-The model does **not** directly execute arbitrary Python. It produces a constrained spatial workflow that the engine validates and compiles. This enables safe, debuggable operations such as loading datasets, buffering, intersecting, filtering, drive-time analysis, scoring, candidate generation, and visualization.
+Language models plan and explain. They never execute spatial operations or fabricate results. The runtime is deterministic: given the same datasets, parameters, and software versions, it produces the same outputs.
 
-Example workflow:
+The planner emits a stable workflow representation rather than raw code. The runtime validates and compiles that representation into backend-specific operations.
 
-```yaml
-load:
-  - hospitals
-  - roads
-  - population
+## Initial scope
 
-operations:
-  - drive_time:
-      hospitals: 15min
-  - intersect:
-      population
-  - score:
-      access
+The initial use case is emergency-facility placement: improve population coverage while avoiding flood risk. It uses a curated vocabulary of operations such as loading datasets, buffering, intersections, overlays, routing, scoring, ranking, and visualization.
 
-visualize: heatmap
-```
+Heka builds on existing GIS engines rather than replacing them. QGIS/PyQGIS is an execution engine, not the product headline.
 
-## MVP focus
+## Repository layout
 
-Build one polished, credible decision flow rather than a fully general GIS platform:
-
-> Where should we place the next emergency facility to improve coverage while avoiding flood risk?
-
-Use a curated set of datasets and a small, reliable spatial-operation vocabulary. Make the workflow replay and explanation panel excellent. QGIS/PyQGIS is the invisible execution engine—not the headline.
+- `src/` - React desktop workspace, application ports, domain model, and infrastructure adapters
+- `src-tauri/` - Tauri desktop shell and IPC command boundary
+- `worker/` - Python JSON-lines worker contract for workflow validation and future PyQGIS execution
+- `docs/ARCHITECTURE.md` - module boundaries and project-folder model
 
 ## Vision
 
-Heka begins with public geographic data, but the underlying interface can reason over campuses, factories, warehouses, farms, hospitals, and any mapped environment. The long-term ambition is a natural-language interface to spatial reasoning engines.
+Heka begins with public geographic data but can eventually reason over cities, campuses, factories, warehouses, farms, hospitals, and other mapped environments. Its goal is a natural-language interface to trustworthy spatial reasoning engines.
