@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Cartesian3, Color, EllipsoidTerrainProvider, Viewer } from "cesium";
 import "cesium/Build/Cesium/Widgets/widgets.css";
+import { PlannerComposer } from "../planner/PlannerComposer";
 
 export function GlobePanel() {
   const host = useRef<HTMLDivElement>(null); const viewer = useRef<Viewer>(); const [error, setError] = useState<string>();
@@ -18,5 +19,5 @@ export function GlobePanel() {
     void start();
     return () => { viewer.current?.destroy(); viewer.current = undefined; };
   }, []);
-  return <section className="globe-panel"><div className="panel-label"><span>GLOBE VIEW</span><small>WGS 84 · EPSG:4326</small></div><div className="cesium-host" ref={host} />{error && <div className="globe-error">{error}</div>}<div className="globe-hint">Drag to rotate · Scroll to zoom · Shift + drag to pan</div></section>;
+  return <section className="globe-panel"><div className="panel-label"><span>GLOBE VIEW</span><small>WGS 84 · EPSG:4326</small></div><div className="cesium-host" ref={host} />{error && <div className="globe-error">{error}</div>}<div className="globe-hint">Drag to rotate · Scroll to zoom · Shift + drag to pan</div><PlannerComposer /></section>;
 }

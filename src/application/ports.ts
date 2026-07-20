@@ -1,8 +1,4 @@
-import type { AnalysisIntent, DatasetRef, SpatialReasoningGraph, SpatialWorkflow } from "../domain/spatial";
-
-export interface PlannerPort {
-  plan(question: string, datasets: DatasetRef[]): Promise<{ intent: AnalysisIntent; graph: SpatialReasoningGraph; workflow: SpatialWorkflow }>;
-}
+import type { DatasetRef, SpatialWorkflow } from "../domain/spatial";
 
 export interface RuntimeEvent {
   workflowId: string;
