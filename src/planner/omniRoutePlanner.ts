@@ -2,7 +2,10 @@ import { HEKA_PLANNER_SYSTEM_PROMPT } from "./plannerPrompt";
 import { plannerJsonSchema, plannerOutputSchema, type PlannerOutput } from "./plannerSchema";
 
 const endpoint = (import.meta.env.VITE_OMNIROUTE_BASE_URL ?? "http://localhost:20128/v1").replace(/\/$/, "");
-const model = import.meta.env.VITE_OMNIROUTE_MODEL ?? "auto";
+// `auto` can fan out across unavailable community providers and exceed the
+// desktop planner's timeout. This no-auth OpenCode model has been verified to
+// return OmniRoute JSON-schema output; deployments can still override it.
+const model = import.meta.env.VITE_OMNIROUTE_MODEL ?? "oc/big-pickle";
 const apiKey = import.meta.env.VITE_OMNIROUTE_API_KEY ?? "";
 
 export class PlannerRequestError extends Error { constructor(message: string) { super(message); this.name = "PlannerRequestError"; } }
