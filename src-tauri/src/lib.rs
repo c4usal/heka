@@ -29,7 +29,15 @@ fn runtime_health() -> RuntimeHealth {
 async fn execute_fire_station_analysis(app: AppHandle, request: ExecutionRequest) -> Result<ExecutionResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let development_script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../worker/heka_worker.py");
-        let script = if development_script.exists() { development_script } else { app.path().resource_dir().map_err(|error| error.to_string())?.join("worker/heka_worker.py") };
+        let script = if development_script.exists() {
+            development_script
+        } else {
+            let resources = app.path().resource_dir().map_err(|error| error.to_string())?;
+            [resources.join("worker/heka_worker.py"), resources.join("_up_/worker/heka_worker.py")]
+                .into_iter()
+                .find(|candidate| candidate.exists())
+                .ok_or("The bundled PyQGIS worker could not be found.")?
+        };
         let launcher = std::env::var("HEKA_QGIS_PYTHON").unwrap_or_else(|_| r"C:\OSGeo4W\bin\python-qgis-ltr.bat".to_string());
         if !std::path::Path::new(&launcher).exists() { return Err("QGIS LTR was not found. Install QGIS through OSGeo4W or set HEKA_QGIS_PYTHON to python-qgis-ltr.bat.".into()); }
         let input = serde_json::json!({ "action": "fire-station-analysis", "dataDirectory": request.data_directory, "outputPath": request.output_path }).to_string();
