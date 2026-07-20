@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Cartesian3, Color, ConstantProperty, EllipsoidTerrainProvider, GeoJsonDataSource, Viewer } from "cesium";
+import { Cartesian3, Color, ConstantProperty, EllipsoidTerrainProvider, GeoJsonDataSource, ImageryLayer, OpenStreetMapImageryProvider, Viewer } from "cesium";
 import "cesium/Build/Cesium/Widgets/widgets.css";
 import { PlannerComposer } from "../planner/PlannerComposer";
 import { useWorkspaceStore } from "../../stores/useWorkspaceStore";
@@ -15,7 +15,7 @@ export function GlobePanel() {
   useEffect(() => {
     if (!host.current || viewer.current) return;
     try {
-      viewer.current = new Viewer(host.current, { animation: false, baseLayer: false, baseLayerPicker: false, geocoder: false, homeButton: true, infoBox: false, navigationHelpButton: false, sceneModePicker: false, selectionIndicator: false, skyAtmosphere: false, skyBox: false, timeline: false, terrainProvider: new EllipsoidTerrainProvider() });
+      viewer.current = new Viewer(host.current, { animation: false, baseLayer: new ImageryLayer(new OpenStreetMapImageryProvider({ url: "https://tile.openstreetmap.org/" })), baseLayerPicker: false, geocoder: false, homeButton: true, infoBox: false, navigationHelpButton: false, sceneModePicker: false, selectionIndicator: false, skyAtmosphere: false, skyBox: false, timeline: false, terrainProvider: new EllipsoidTerrainProvider() });
       viewer.current.scene.backgroundColor = Color.fromCssColorString("#0a1514");
       viewer.current.scene.globe.baseColor = Color.fromCssColorString("#2a8270");
       viewer.current.scene.globe.enableLighting = false;

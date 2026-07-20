@@ -7,7 +7,7 @@ import { transformPlannerOutput } from "../../planner/planTransforms";
 import { useWorkspaceStore } from "../../stores/useWorkspaceStore";
 
 export function PlannerComposer() {
-  const [question, setQuestion] = useState("Where should Calgary place a new emergency facility to improve coverage while avoiding flood risk?");
+  const [question, setQuestion] = useState("Where should Calgary build another fire station?");
   const { planner, execution, beginPlanning, applyPlan, failPlanning, completeTimelineStep, beginExecution, updateExecution, completeExecution, failExecution } = useWorkspaceStore();
   const submit = async () => { if (!question.trim() || planner.status === "planning") return; beginPlanning();
     try { const output = await planWithOmniRoute(question); applyPlan(transformPlannerOutput(question, output)); [0, 1, 2, 3, 4, 5, 6].forEach((index) => window.setTimeout(() => completeTimelineStep(index), index * 260)); }

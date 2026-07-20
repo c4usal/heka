@@ -24,7 +24,7 @@ async function requestPlan(question: string, repair?: string): Promise<PlannerOu
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") throw new PlannerRequestError("OmniRoute timed out. Check that the local gateway is running.");
     if (error instanceof PlannerRequestError) throw error;
-    throw new PlannerRequestError("OmniRoute is unavailable. Start it locally and verify the configured endpoint.");
+    throw new PlannerRequestError("OmniRoute is offline. Start the local gateway with `omniroute`, connect a provider in its dashboard at http://localhost:20128, then try again.");
   } finally { window.clearTimeout(timeout); }
 }
 
