@@ -1,8 +1,9 @@
-import { Command, PanelRight, Search, Sparkles } from "lucide-react";
+import { Command, PanelRight, Search } from "lucide-react";
+import { hekaLogo as logo } from "../assets/hekaLogo";
 
 export function AppMenu() {
   return <header className="menu-bar">
-    <div className="app-mark" aria-label="Heka"><Sparkles size={15} /></div>
+    <div className="app-mark" aria-label="Heka"><img src={logo} alt="Heka" /></div>
     <span className="app-name">Heka</span>
     <nav aria-label="Application menu"><button>File</button><button>Edit</button><button>View</button><button>Run</button></nav>
     <label className="command-search"><Search size={14} /><input aria-label="Command search" placeholder="Search Heka commands" /><kbd><Command size={10} /> P</kbd></label>

@@ -1,0 +1,14 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "heka-ai-gateway",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-21",
+  "workers_dev": true,
+  "vars": {
+    "GROQ_MODEL": "openai/gpt-oss-120b"
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  }
+}

@@ -20,6 +20,19 @@ DATA_URLS = {
     "fire_stations": "https://services1.arcgis.com/AVP60cs0Q9PEA8rH/arcgis/rest/services/Fire_Stations/FeatureServer/0/query?where=1%3D1&outFields=*&returnGeometry=true&f=geojson",
     "communities": "https://services1.arcgis.com/AVP60cs0Q9PEA8rH/arcgis/rest/services/Community_Districts/FeatureServer/0/query?where=1%3D1&outFields=*&returnGeometry=true&f=geojson",
 }
+# This is an explicit local dataset registry, not an LLM prompt convention. The
+# executor accepts a plan only when every requested logical dataset resolves to
+# a real local layer that it can load through QGIS.
+DATASET_REGISTRY = {
+    "fire_stations": {
+        "label": "Calgary fire station locations", "kind": "facilities", "geometry": "point",
+        "terms": ("calgary fire station locations", "fire stations", "fire station", "emergency station", "emergency facility"),
+    },
+    "communities": {
+        "label": "Calgary community districts", "kind": "boundaries", "geometry": "polygon",
+        "terms": ("calgary community districts", "community districts", "communities", "community", "neighborhood", "neighbourhood", "district"),
+    },
+}
 native_provider: Any | None = None
 qgis_application: Any | None = None
 
@@ -45,6 +58,60 @@ def bootstrap(data_dir: Path) -> dict[str, str]:
                 target.write_bytes(response.read())
         paths[name] = str(target)
     return paths
+
+def resolve_local_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    """Validate the planner's declarative intent against Heka's local catalog.
+
+    The model provides only intent and Spatial DSL. This resolver chooses no
+    geometry and runs no model-supplied code; the QGIS adapter below owns every
+    concrete operation.
+    """
+    if not isinstance(plan, dict) or not isinstance(plan.get("objective"), str):
+        raise RuntimeError("Heka received an invalid spatial plan.")
+    readiness = plan.get("executionReadiness")
+    if readiness != "ready":
+        raise RuntimeError(f"This plan is marked '{readiness or 'not ready'}' and cannot be executed until its data or clarification requirements are resolved.")
+    requested = plan.get("requiredDatasets")
+    if not isinstance(requested, list) or not requested:
+        raise RuntimeError("The spatial plan did not identify any datasets.")
+    resolved: set[str] = set()
+    unsupported: list[str] = []
+    for dataset in requested:
+        name = dataset.get("name", "") if isinstance(dataset, dict) else str(dataset)
+        normalized = name.lower()
+        matches = [key for key, definition in DATASET_REGISTRY.items() if any(term in normalized for term in definition["terms"])]
+        if matches: resolved.add(matches[0])
+        else: unsupported.append(name)
+    by_kind = {DATASET_REGISTRY[key]["kind"] for key in resolved}
+    required_kinds = {"facilities", "boundaries"}
+    if not required_kinds.issubset(by_kind):
+        missing = ", ".join(kind for kind in sorted(required_kinds - by_kind))
+        raise RuntimeError(f"This local runtime supports facility-coverage analysis and needs a loaded {missing} dataset.")
+    if unsupported:
+        raise RuntimeError(f"The plan requested datasets not loaded in this workspace: {', '.join(unsupported)}. Add them or ask a question using the Calgary station and community datasets.")
+    workflow = plan.get("dsl", [])
+    if not isinstance(workflow, list) or not workflow:
+        raise RuntimeError("The validated plan has no Spatial DSL operations to execute.")
+    supported = {"LoadDataset", "Buffer", "Overlay", "Difference", "Intersect", "Coverage", "Score", "Rank", "Visualize"}
+    unknown = [str(step.get("operation")) for step in workflow if isinstance(step, dict) and step.get("operation") not in supported]
+    if unknown:
+        raise RuntimeError(f"This local runtime does not support these planned operations yet: {', '.join(unknown)}.")
+    operations = {str(step.get("operation")) for step in workflow if isinstance(step, dict)}
+    if not ({"Buffer", "Coverage"} & operations) or "Difference" not in operations or "Rank" not in operations:
+        raise RuntimeError("The local facility-coverage runtime requires a coverage/buffer, difference, and ranking workflow.")
+    distance = None
+    for step in workflow:
+        if not isinstance(step, dict) or step.get("operation") not in {"Buffer", "Coverage"}:
+            continue
+        for parameter in step.get("parameters", []):
+            if isinstance(parameter, dict) and str(parameter.get("name", "")).lower() in {"distancemeters", "coverage_distancemeters", "distance"}:
+                value = parameter.get("value")
+                if isinstance(value, (int, float)) and not isinstance(value, bool): distance = float(value)
+    if distance is None or not 250 <= distance <= 30000:
+        raise RuntimeError("The Spatial DSL must specify a coverage distance between 250 and 30000 meters.")
+    facility = next(key for key in resolved if DATASET_REGISTRY[key]["kind"] == "facilities")
+    boundary = next(key for key in resolved if DATASET_REGISTRY[key]["kind"] == "boundaries")
+    return {"objective": plan["objective"], "resolved": sorted(resolved), "facility": facility, "boundary": boundary, "coverageDistanceMeters": distance}
 
 def setup_qgis() -> None:
     global native_provider, qgis_application
@@ -82,7 +149,7 @@ def export_map_layer(layer: Any, layer_id: str, name: str, kind: str, output_dir
         raise RuntimeError(f"QGIS could not open the exported {name} map layer.")
     return {"id": layer_id, "name": name, "kind": kind, "geojson": path.read_text(encoding="utf-8"), "featureCount": verified.featureCount(), "outputPath": str(path)}
 
-def run_fire_station_analysis(message: dict[str, Any]) -> dict[str, Any]:
+def run_spatial_plan(message: dict[str, Any]) -> dict[str, Any]:
     try:
         setup_qgis()
         from qgis.core import QgsVectorLayer
@@ -90,19 +157,23 @@ def run_fire_station_analysis(message: dict[str, Any]) -> dict[str, Any]:
     except Exception as error:
         raise RuntimeError(f"PyQGIS is unavailable. Install QGIS LTR and set QGIS_PREFIX_PATH if needed. ({error})") from error
 
-    started = time.perf_counter(); data_dir = data_directory(message); paths = bootstrap(data_dir)
+    started = time.perf_counter(); progress("plan-validation", 8, "Validating the Spatial DSL against the local dataset catalog")
+    plan_context = resolve_local_plan(message.get("plan", {})); data_dir = data_directory(message); paths = bootstrap(data_dir)
     missing = [name for name, path in paths.items() if not Path(path).exists()]
     if missing: raise RuntimeError(f"Required local datasets are missing: {', '.join(missing)}")
     work_dir = Path(tempfile.mkdtemp(prefix="heka-fire-stations-")); target_crs = "EPSG:3400"  # NAD83 / Alberta 10TM
-    progress("dataset-load", 35, "Loading local Calgary station and boundary layers")
-    stations = QgsVectorLayer(paths["fire_stations"], "Fire stations", "ogr")
-    communities = QgsVectorLayer(paths["communities"], "Community districts", "ogr")
+    facility_id, boundary_id = plan_context["facility"], plan_context["boundary"]
+    facility_name, boundary_name = DATASET_REGISTRY[facility_id]["label"], DATASET_REGISTRY[boundary_id]["label"]
+    progress("dataset-load", 35, f"Loading datasets for: {plan_context['objective']}")
+    stations = QgsVectorLayer(paths[facility_id], facility_name, "ogr")
+    communities = QgsVectorLayer(paths[boundary_id], boundary_name, "ogr")
     if not stations.isValid() or not communities.isValid(): raise RuntimeError("QGIS could not read one or more local GeoJSON datasets.")
     progress("reproject", 45, "Reprojecting layers into Alberta 10TM for meter-based analysis")
     stations_projected = processing.run("native:reprojectlayer", {"INPUT": stations, "TARGET_CRS": target_crs, "OUTPUT": str(work_dir / "stations.gpkg")})["OUTPUT"]
     communities_projected = processing.run("native:reprojectlayer", {"INPUT": communities, "TARGET_CRS": target_crs, "OUTPUT": str(work_dir / "communities.gpkg")})["OUTPUT"]
-    progress("buffer", 55, "Generating 5 km fire-station coverage areas")
-    coverage = processing.run("native:buffer", {"INPUT": stations_projected, "DISTANCE": 5000, "SEGMENTS": 16, "END_CAP_STYLE": 0, "JOIN_STYLE": 0, "MITER_LIMIT": 2, "DISSOLVE": True, "OUTPUT": str(work_dir / "coverage.gpkg")})["OUTPUT"]
+    coverage_distance = plan_context["coverageDistanceMeters"]
+    progress("buffer", 55, f"Generating {coverage_distance:g} m facility coverage areas")
+    coverage = processing.run("native:buffer", {"INPUT": stations_projected, "DISTANCE": coverage_distance, "SEGMENTS": 16, "END_CAP_STYLE": 0, "JOIN_STYLE": 0, "MITER_LIMIT": 2, "DISSOLVE": True, "OUTPUT": str(work_dir / "coverage.gpkg")})["OUTPUT"]
     progress("difference", 67, "Finding community areas outside existing coverage")
     gaps = processing.run("native:difference", {"INPUT": communities_projected, "OVERLAY": coverage, "GRID_SIZE": None, "OUTPUT": str(work_dir / "coverage_gaps.gpkg")})["OUTPUT"]
     progress("score", 77, "Scoring coverage gaps by uncovered community area")
@@ -115,23 +186,23 @@ def run_fire_station_analysis(message: dict[str, Any]) -> dict[str, Any]:
     output_dir = output_path.parent
     # Each item is a direct QGIS output: no geometry is altered in the frontend.
     map_layers = [
-        export_map_layer(stations_projected, "fire_stations", "Existing fire stations", "stations", output_dir, work_dir),
-        export_map_layer(coverage, "fire_station_coverage", "Existing 5 km coverage", "coverage", output_dir, work_dir),
-        export_map_layer(scored, "coverage_gaps", "Communities outside coverage", "gaps", output_dir, work_dir),
-        export_map_layer(ranked, "fire_station_candidates", "Ranked fire station candidates", "candidates", output_dir, work_dir),
+        export_map_layer(stations_projected, facility_id, f"Existing {facility_name}", "stations", output_dir, work_dir),
+        export_map_layer(coverage, "facility_coverage", f"Existing {coverage_distance:g} m coverage", "coverage", output_dir, work_dir),
+        export_map_layer(scored, "coverage_gaps", f"{boundary_name} outside coverage", "gaps", output_dir, work_dir),
+        export_map_layer(ranked, "facility_candidates", "Ranked facility candidates", "candidates", output_dir, work_dir),
     ]
     candidate_layer = map_layers[-1]
     if output_path != Path(candidate_layer["outputPath"]):
         output_path.write_text(candidate_layer["geojson"], encoding="utf-8")
     feature_count = candidate_layer["featureCount"]; geojson = candidate_layer["geojson"]
     progress("complete", 100, f"Generated {feature_count} ranked candidate locations")
-    return {"layerName": "Ranked fire station candidates", "geojson": geojson, "outputPath": str(output_path), "featureCount": feature_count, "elapsedMs": round((time.perf_counter() - started) * 1000), "warnings": ["Coverage is a 5 km straight-line proxy, not a road-network travel-time model."], "mapLayers": map_layers}
+    return {"layerName": "Ranked facility candidates", "geojson": geojson, "outputPath": str(output_path), "featureCount": feature_count, "elapsedMs": round((time.perf_counter() - started) * 1000), "warnings": ["Coverage is a straight-line distance proxy, not a road-network travel-time model."], "mapLayers": map_layers}
 
 def handle(message: dict[str, Any]) -> None:
     try:
         action = message.get("action")
         if action == "bootstrap": emit("result", {"datasets": bootstrap(data_directory(message))})
-        elif action == "fire-station-analysis": emit("result", run_fire_station_analysis(message))
+        elif action == "execute-plan": emit("result", run_spatial_plan(message))
         else: emit("error", {"message": "Unsupported worker action."})
     except Exception as error: emit("error", {"message": str(error)})
 

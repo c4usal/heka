@@ -3,7 +3,7 @@
 ## Prerequisites
 
 1. Install **QGIS LTR** with OSGeo4W. Heka detects the standard launcher automatically at `C:\OSGeo4W\bin\python-qgis-ltr.bat`.
-2. Start OmniRoute locally. Heka expects its OpenAI-compatible endpoint at `http://localhost:20128/v1` by default. Override the endpoint, key, or model with `VITE_OMNIROUTE_BASE_URL`, `VITE_OMNIROUTE_API_KEY`, and `VITE_OMNIROUTE_MODEL` before building when required.
+2. Configure a planner key for the desktop runtime once: set the Windows user environment variable `HEKA_GROQ_API_KEY` to a Groq API key. Heka uses Groq's strict JSON-schema-capable `openai/gpt-oss-120b` model by default. No local Docker or OmniRoute process is required.
 3. Keep an internet connection for the first Calgary run. Heka caches the public City of Calgary feature layers locally after downloading them.
 
 ## Start the app
@@ -15,16 +15,15 @@ Install either Windows bundle from `src-tauri\target\release\bundle`:
 
 Launch **Heka** from the Start menu or installation directory. The normal QGIS location is detected automatically. If QGIS is somewhere else, set `HEKA_QGIS_PYTHON` to the full path of its `python-qgis-ltr.bat` launcher before starting Heka.
 
-## Verify OmniRoute
+## Verify the planner
 
-With OmniRoute running, submit a question in Heka. A working connection changes the planner from **OmniRoute is constructing a spatial plan...** to a populated Reasoning Inspector with a validated objective, graph, and Spatial DSL. A connection failure is shown in the composer instead of silently falling back to a mock planner.
+Submit a question in Heka. A working connection produces a populated Reasoning Inspector with a JSON-schema-validated objective, graph, and Spatial DSL. A connection failure is shown in the composer instead of silently falling back to a mock planner.
 
 ## Run the Calgary fire-station demonstration
 
 1. Enter: `Where should Calgary build another fire station?`
-2. Press **Enter** and let the Replay Timeline finish planning.
-3. Select **Run Calgary analysis**.
-4. Watch the live execution stages: local data loading, Alberta 10TM reprojection, 5 km station coverage, coverage-gap scoring, candidate ranking, and export.
+2. Press **Enter**. A validated, executable coverage plan starts QGIS automatically.
+3. Watch the live execution stages: local data loading, Alberta 10TM reprojection, 5 km station coverage, coverage-gap scoring, candidate ranking, and export.
 5. Heka adds the candidate layer to the Cesium globe and zooms to it. Use **Hide candidates** / **Show candidates** to toggle it.
 6. Read the PyQGIS execution card in the Reasoning Inspector for feature count, runtime, generated layer, and warnings.
 
@@ -40,8 +39,8 @@ The result is `exports\fire_station_candidates.geojson`, in WGS84 / CRS84 and re
 
 - The demonstration ranks community-area coverage gaps with a **5 km straight-line buffer**. It is not road-network travel-time analysis and must not be treated as a city planning recommendation.
 - The first run downloads public City of Calgary layers; later runs use the local cache.
-- OmniRoute must run locally; Heka does not include a model or secret key.
-- This build is purpose-built for the Calgary fire-station demo, not a generic GIS workflow engine.
+- The current local runtime supports a data-validated facility-coverage analysis family. Other questions are planned honestly, but Heka identifies missing datasets instead of fabricating a map result.
+- The model key stays in the Tauri desktop shell and is never sent to the browser UI or PyQGIS worker.
 
 ## 60-second demo script
 

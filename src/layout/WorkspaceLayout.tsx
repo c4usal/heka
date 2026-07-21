@@ -1,6 +1,7 @@
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { FilePlus2, Map, Plus, X } from "lucide-react";
+import { FilePlus2, Plus, X } from "lucide-react";
 import { useState } from "react";
+import { hekaLogo as logo } from "../assets/hekaLogo";
 import { GlobePanel } from "../panels/globe/GlobePanel";
 import { PlannerComposer } from "../panels/planner/PlannerComposer";
 import { useWorkspaceStore } from "../stores/useWorkspaceStore";
@@ -28,7 +29,7 @@ export function WorkspaceLayout() {
       <section className="tab-workspace">
         <header className="tab-strip" aria-label="Workspace tabs">
           {tabs.map((tab) => <button className={`workspace-tab ${activeTab === tab.id ? "active" : ""}`} key={tab.id} onClick={() => setActiveTab(tab.id)}>
-            {tab.kind === "map" ? <Map size={14} /> : <FilePlus2 size={14} />}<span>{tab.label}</span>{tab.kind !== "map" && <X size={13} onClick={(event) => { event.stopPropagation(); closeTab(tab.id); }} />}
+            {tab.kind === "map" ? <img src={logo} alt="" /> : <FilePlus2 size={14} />}<span>{tab.label}</span>{tab.kind !== "map" && <X size={13} onClick={(event) => { event.stopPropagation(); closeTab(tab.id); }} />}
           </button>)}
           <button className="new-tab" onClick={addTab} title="Open a new workspace tab"><Plus size={16} /></button>
         </header>

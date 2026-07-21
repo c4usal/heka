@@ -6,8 +6,8 @@ export interface Analysis { id: string; name: string; status: "draft" | "ready" 
 export interface TimelineState { progress: number; isPlaying: boolean; steps: Array<{ id: string; label: string; status: "pending" | "ready" | "complete" }>; }
 export interface GraphNode { id: string; label: string; kind: "question" | "dataset" | "operation" | "output"; }
 export interface GraphEdge { from: string; to: string; }
-export interface SpatialDslStep { id: string; operation: string; label: string; inputs: string[]; rationale: string; }
-export interface PlannerPlan { question: string; objective: string; location: string | null; geographicScope: string; requiredDatasets: Array<{ name: string; purpose: string; kind: string }>; constraints: Array<{ label: string; value: string; source: "user" | "planner" }>; assumptions: string[]; desiredOutput: string; workflowSummary: string; confidence: number; clarificationQuestions: string[]; graph: { nodes: GraphNode[]; edges: GraphEdge[] }; dsl: SpatialDslStep[]; }
+export interface SpatialDslStep { id: string; operation: string; label: string; inputs: string[]; parameters: Array<{ name: string; value: string | number | boolean | null }>; rationale: string; }
+export interface PlannerPlan { question: string; objective: string; location: string | null; geographicScope: string; requiredDatasets: Array<{ name: string; purpose: string; kind: string }>; constraints: Array<{ label: string; value: string; source: "user" | "planner" }>; assumptions: string[]; desiredOutput: string; workflowSummary: string; confidence: number; clarificationQuestions: string[]; executionReadiness: "ready" | "needs_data" | "needs_clarification" | "unsupported"; graph: { nodes: GraphNode[]; edges: GraphEdge[] }; dsl: SpatialDslStep[]; }
 export interface PlannerState { status: "idle" | "ready" | "planning" | "complete" | "error"; notes: string[]; plan?: PlannerPlan; error?: string; }
 export interface RuntimeState { status: "offline" | "ready" | "running"; backend: string; }
 export type MapLayerKind = "stations" | "coverage" | "gaps" | "candidates" | "generic";

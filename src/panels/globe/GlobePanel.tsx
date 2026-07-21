@@ -1,14 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { Cartesian3, Color, ColorMaterialProperty, ConstantProperty, EllipsoidTerrainProvider, GeoJsonDataSource, ImageryLayer, JulianDate, OpenStreetMapImageryProvider, ScreenSpaceEventType, Viewer } from "cesium";
 import "./mapViewer.css";
-import { Eye, EyeOff, Layers } from "lucide-react";
+import { Crosshair, Eye, EyeOff, Layers } from "lucide-react";
 import { useWorkspaceStore } from "../../stores/useWorkspaceStore";
 import type { MapLayer, MapLayerKind } from "../../types/workspace";
 
 type SourceRecord = { layer: MapLayer; source: GeoJsonDataSource; visible: boolean };
-// The composer now lives in the dedicated Cursor-style chat pane. Keeping this
-// inert node preserves the map panel's existing DOM boundary during migration.
-const PlannerComposer = () => null;
 const styles: Record<MapLayerKind, { fill: Color; stroke: Color; marker: Color; size: number }> = {
   stations: { fill: Color.fromCssColorString("#22d3ee").withAlpha(0.18), stroke: Color.fromCssColorString("#0891b2"), marker: Color.fromCssColorString("#06b6d4"), size: 10 },
   coverage: { fill: Color.fromCssColorString("#34d399").withAlpha(0.18), stroke: Color.fromCssColorString("#059669"), marker: Color.fromCssColorString("#059669"), size: 8 },
@@ -91,7 +88,13 @@ export function GlobePanel() {
     return { ...record, visible: !record.visible };
   }));
 
+  const focusLayers = () => {
+    const visible = layers.filter((record) => record.visible);
+    const primary = visible.find((record) => record.layer.kind === "gaps") ?? visible.find((record) => record.layer.kind === "candidates") ?? visible[0];
+    if (primary) void viewer.current?.flyTo(primary.source, { duration: 1.1 });
+  };
+
   return <section className="globe-panel"><div className="panel-label"><span>GLOBE VIEW</span><small>QGIS OUTPUT · WGS 84 / EPSG:4326</small></div><div className="cesium-host" ref={host} />
-    {layers.length > 0 && <aside className="map-layers"><header><Layers size={12} /> QGIS layers</header>{layers.map(({ layer, visible }) => <button key={layer.id} onClick={() => toggleLayer(layer.id)} title={`${layer.outputPath} · ${layer.featureCount} features`}><span className={`layer-swatch ${layer.kind}`} />{visible ? <Eye size={12} /> : <EyeOff size={12} />}<b>{layer.name}</b><em>{layer.featureCount}</em></button>)}</aside>}
-    {error && <div className="globe-error">{error}</div>}<div className="globe-hint">Drag to rotate · Scroll to zoom · Shift + drag to pan · Click a feature to inspect it</div><PlannerComposer /></section>;
+    {layers.length > 0 && <aside className="map-layers"><button className="layers-focus" onClick={focusLayers} title="Zoom to visible QGIS output layers"><Layers size={12} /> QGIS layers <Crosshair size={11} /></button>{layers.map(({ layer, visible }) => <button key={layer.id} onClick={() => toggleLayer(layer.id)} title={`${layer.outputPath} · ${layer.featureCount} features`}><span className={`layer-swatch ${layer.kind}`} />{visible ? <Eye size={12} /> : <EyeOff size={12} />}<b>{layer.name}</b><em>{layer.featureCount}</em></button>)}</aside>}
+    {error && <div className="globe-error">{error}</div>}<div className="globe-hint">Drag to rotate · Scroll to zoom · Shift + drag to pan · Click a feature to inspect it</div></section>;
 }

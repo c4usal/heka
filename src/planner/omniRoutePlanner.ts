@@ -1,5 +1,7 @@
 import { HEKA_PLANNER_SYSTEM_PROMPT } from "./plannerPrompt";
 import { plannerJsonSchema, plannerOutputSchema, type PlannerOutput } from "./plannerSchema";
+import { invoke } from "@tauri-apps/api/core";
+import { plannerDatasetContext } from "../datasets/datasetCatalog";
 
 const endpoint = (import.meta.env.VITE_OMNIROUTE_BASE_URL ?? "http://localhost:20128/v1").replace(/\/$/, "");
 // Keep Heka on one direct, structured-output-capable model instead of an
@@ -7,6 +9,7 @@ const endpoint = (import.meta.env.VITE_OMNIROUTE_BASE_URL ?? "http://localhost:2
 // Groq credential lives in local OmniRoute; deployments can still override it.
 const model = import.meta.env.VITE_OMNIROUTE_MODEL ?? "groq/openai/gpt-oss-20b";
 const apiKey = import.meta.env.VITE_OMNIROUTE_API_KEY ?? "";
+const directModel = import.meta.env.VITE_HEKA_GROQ_MODEL ?? "openai/gpt-oss-120b";
 
 export class PlannerRequestError extends Error { constructor(message: string) { super(message); this.name = "PlannerRequestError"; } }
 
@@ -60,6 +63,7 @@ function normalizePlannerPayload(payload: unknown): unknown {
         if (operation.includes("load")) return "LoadDataset";
         if (operation.includes("buffer")) return "Buffer";
         if (operation.includes("overlay")) return "Overlay";
+        if (operation.includes("difference") || operation.includes("subtract") || operation.includes("gap")) return "Difference";
         if (operation.includes("intersect") || operation.includes("clip")) return "Intersect";
         if (operation.includes("route") || operation.includes("travel")) return "Route";
         if (operation.includes("cover")) return "Coverage";
@@ -74,18 +78,22 @@ function normalizePlannerPayload(payload: unknown): unknown {
         operation: normalizedOperation,
         label: typeof workflowStep.label === "string" ? workflowStep.label : description,
         inputs: Array.isArray(workflowStep.inputs) ? workflowStep.inputs : [],
+        parameters: Array.isArray(workflowStep.parameters) ? workflowStep.parameters : [],
         rationale: typeof workflowStep.rationale === "string" ? workflowStep.rationale : description
       };
-    }) : plan.workflow
+    }) : plan.workflow,
+    executionReadiness: plan.executionReadiness === "ready" || plan.executionReadiness === "needs_data" || plan.executionReadiness === "needs_clarification" || plan.executionReadiness === "unsupported" ? plan.executionReadiness : "needs_data",
   };
 }
 
 async function requestPlan(question: string, repair?: string): Promise<PlannerOutput> {
   const controller = new AbortController(); const timeout = window.setTimeout(() => controller.abort(), 25_000);
   try {
-    const response = await fetch(`${endpoint}/chat/completions`, { method: "POST", signal: controller.signal, headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) }, body: JSON.stringify({ model, temperature: 0.1, stream: false, response_format: { type: "json_schema", json_schema: plannerJsonSchema }, messages: [{ role: "system", content: HEKA_PLANNER_SYSTEM_PROMPT }, { role: "user", content: repair ? `Original question: ${question}\n\nThe previous response failed validation: ${repair}\nReturn a corrected JSON object only.` : question }] }) });
-    const payload = await response.json().catch(() => { throw new PlannerRequestError("OmniRoute returned an unreadable response."); }) as ChatCompletion;
-    if (!response.ok) throw new PlannerRequestError(payload.error?.message ?? `OmniRoute request failed (${response.status}).`);
+    const catalog = `\n\nAVAILABLE LOCAL DATASET CATALOG:\n${plannerDatasetContext()}`;
+    const body = { model: "__TAURI_INTERNALS__" in window ? directModel : model, temperature: 0.1, stream: false, max_tokens: 1800, response_format: { type: "json_schema", json_schema: plannerJsonSchema }, messages: [{ role: "system", content: `${HEKA_PLANNER_SYSTEM_PROMPT}${catalog}` }, { role: "user", content: repair ? `Original question: ${question}\n\nThe previous response failed validation: ${repair}\nReturn a corrected JSON object only.` : question }] };
+    const payload = ("__TAURI_INTERNALS__" in window
+      ? await invoke<ChatCompletion>("request_groq_planner", { request: { body } })
+      : await (async () => { const response = await fetch(`${endpoint}/chat/completions`, { method: "POST", signal: controller.signal, headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) }, body: JSON.stringify(body) }); const value = await response.json().catch(() => { throw new PlannerRequestError("OmniRoute returned an unreadable response."); }) as ChatCompletion; if (!response.ok) throw new PlannerRequestError(value.error?.message ?? `OmniRoute request failed (${response.status}).`); return value; })()) as ChatCompletion;
     const content = payload.choices?.[0]?.message?.content;
     if (!content?.trim()) throw new PlannerRequestError("OmniRoute returned an empty planning result.");
     let parsed: unknown; try { parsed = JSON.parse(content); } catch { throw new PlannerRequestError("OmniRoute returned invalid JSON instead of a structured plan."); }

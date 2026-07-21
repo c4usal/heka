@@ -7,4 +7,8 @@ src-tauri/gen/
 __pycache__/
 *.py[cod]
 .env
+.dev.vars
+ui-dev.log
+services/ai-gateway/.wrangler/
+services/ai-gateway/worker-configuration.d.ts
 .DS_Store

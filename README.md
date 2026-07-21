@@ -52,15 +52,15 @@ The initial use case is emergency-facility placement: improve population coverag
 
 Heka builds on existing GIS engines rather than replacing them. QGIS/PyQGIS is an execution engine, not the product headline.
 
-## First live analysis: Calgary fire-station coverage
+## First live analysis: data-validated facility coverage
 
-In the desktop app, plan a Calgary fire-station question with OmniRoute, then choose **Run Calgary analysis**. Heka starts a background PyQGIS worker which caches the Calgary fire-station and community-boundary GeoJSON files locally, reprojects them to Alberta 10TM, and invokes QGIS Processing algorithms for buffer, difference, area scoring, centroid generation, ranking, and GeoJSON export. The resulting candidate layer is added to Cesium and can be toggled on and off without removing previous result layers.
+In the desktop app, submit a Calgary fire-station question. Heka's Groq-backed structured planner compares the required datasets and DSL to the local catalog; only an executable plan starts the background PyQGIS worker. The worker caches the Calgary fire-station and community-boundary GeoJSON files locally, reprojects them to Alberta 10TM, and invokes QGIS Processing algorithms for buffer, difference, area scoring, centroid generation, ranking, and GeoJSON export. The resulting candidate layer is added to Cesium and can be toggled on and off without removing previous result layers.
 
 The current demonstration uses a transparent 5 km straight-line coverage proxy, not a road-network response-time model. Heka surfaces that limitation in the execution result rather than presenting it as operational advice.
 
 ### Local runtime setup
 
-Install QGIS LTR through OSGeo4W, then run Heka normally. The expected launcher is `C:\OSGeo4W\bin\python-qgis-ltr.bat`; override it with `HEKA_QGIS_PYTHON` when QGIS is installed elsewhere. Set `HEKA_DATA_DIR` to choose the directory used for locally cached demo data and exported GeoJSON. The worker never receives executable code from the planner: it only runs the fixed, reviewed QGIS Processing workflow in `worker/heka_worker.py`.
+Install QGIS LTR through OSGeo4W, then run Heka normally. The expected launcher is `C:\OSGeo4W\bin\python-qgis-ltr.bat`; override it with `HEKA_QGIS_PYTHON` when QGIS is installed elsewhere. Set `HEKA_GROQ_API_KEY` as a Windows user environment variable for planner access, and `HEKA_DATA_DIR` to choose the directory used for locally cached demo data and exported GeoJSON. The worker never receives executable code from the planner: it compiles only a reviewed, capability-checked Spatial DSL into QGIS Processing calls in `worker/heka_worker.py`.
 
 ## Repository layout
 
