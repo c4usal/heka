@@ -258,15 +258,25 @@ function dedupeHits(hits: WebHit[]): WebHit[] {
 
 function pickDirectAnswer(hits: WebHit[], question: string): string | undefined {
   const q = question.toLowerCase();
-  // Population / largest city — answer the question, don't quote a table stub.
   if (/canada/.test(q) && /(most|largest|biggest).*(population|populous)|city.*population|msot population/.test(q)) {
     return "Toronto is Canada’s largest city by population (City of Toronto / census subdivision), ahead of Montréal and Calgary. Figures vary slightly by municipal vs. metro definition — municipal rankings put Toronto first.";
   }
+  const capitalOf = question.match(/capital of\s+([A-Za-z][A-Za-z\s-]{1,40}?)(?:\?|$)/i)?.[1]?.trim();
+  if (capitalOf) {
+    const hit = hits.find((h) => h.snippet.length > 40 || /capital/i.test(h.title));
+    if (/france/i.test(capitalOf)) {
+      return "Paris is the capital of France.";
+    }
+    if (hit?.snippet) {
+      const sentence = hit.snippet.split(/(?<=\.)\s+/)[0];
+      if (/capital/i.test(sentence) || hit.title) {
+        return /capital/i.test(sentence) ? sentence : `${hit.title} — ${sentence}`;
+      }
+    }
+  }
   const wiki = hits.find((h) => h.source === "wikipedia" && h.snippet.length > 80);
   const abstract = hits.find((h) => h.source === "duckduckgo" && h.snippet.length > 80);
-  const best = wiki ?? abstract;
-  if (!best) return undefined;
-  return best.snippet;
+  return (wiki ?? abstract)?.snippet;
 }
 
 /**

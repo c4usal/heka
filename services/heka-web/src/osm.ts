@@ -110,9 +110,10 @@ export async function geocodeScope(geographicScope: string): Promise<PlaceFocus>
   };
 }
 
-async function overpassQuery(query: string, timeoutMs = 12000): Promise<{ elements?: unknown[] }> {
+async function overpassQuery(query: string, timeoutMs = 10000): Promise<{ elements?: unknown[] }> {
   let lastError = "OpenStreetMap search failed on every mirror.";
-  for (const endpoint of OVERPASS_ENDPOINTS) {
+  // Try at most 2 mirrors to stay inside Worker budgets.
+  for (const endpoint of OVERPASS_ENDPOINTS.slice(0, 2)) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -446,8 +447,8 @@ function resolveAmenityParts(amenity: string, s: number, n: number, w: number, e
 }
 
 /**
- * One Overpass round-trip for facility siting evidence (any amenity theme).
- * Falls back to a lighter roads+facilities query if the full bundle times out.
+ * Light-first facility evidence: roads + target + activity anchors.
+ * Optional short buildings pass — never block the response on footprints.
  */
 export async function fetchFacilitySitingBundle(place: PlaceFocus, amenity = "hospital"): Promise<FacilitySitingBundle> {
   const empty = (): FacilitySitingBundle => ({
@@ -463,61 +464,52 @@ export async function fetchFacilitySitingBundle(place: PlaceFocus, amenity = "ho
     }
     bundle.roads = bundle.roads.slice(0, 90);
     bundle.facilities = bundle.facilities.slice(0, 120);
-    bundle.buildings = bundle.buildings.slice(0, 320);
+    bundle.buildings = bundle.buildings.slice(0, 280);
     bundle.communityAnchors = bundle.communityAnchors.slice(0, 120);
-    bundle.landuse = bundle.landuse.slice(0, 120);
-    bundle.waterways = bundle.waterways.slice(0, 80);
+    bundle.landuse = bundle.landuse.slice(0, 80);
+    bundle.waterways = bundle.waterways.slice(0, 60);
     return bundle;
   };
 
-  const full = await overpassWithRetries(
+  // Phase 1 — core evidence (must succeed quickly)
+  const core = await overpassWithRetries(
     place.south,
     place.north,
     place.west,
     place.east,
     (s, n, w, e) => {
       const amenityParts = resolveAmenityParts(amenity, s, n, w, e);
-      return `[out:json][timeout:22];
+      return `[out:json][timeout:15];
 way["highway"~"trunk|primary|secondary|tertiary"](${s},${w},${n},${e});
-out geom 80;
+out geom 70;
 (
   ${amenityParts};
-  way["building"](${s},${w},${n},${e});
-  node["amenity"~"school|kindergarten|clinic|doctors|social_facility|nursing_home|marketplace|library|community_centre|bus_station|university|college"](${s},${w},${n},${e});
-  way["amenity"~"school|kindergarten|clinic|doctors|social_facility|nursing_home|marketplace|library|community_centre|bus_station|university|college"](${s},${w},${n},${e});
-  node["shop"~"supermarket|convenience"](${s},${w},${n},${e});
-  way["landuse"~"residential|industrial|military|quarry|landfill|brownfield"](${s},${w},${n},${e});
-  way["waterway"~"river|canal|stream"](${s},${w},${n},${e});
+  node["amenity"~"school|kindergarten|clinic|library|bus_station|community_centre|university|college"](${s},${w},${n},${e});
+  way["amenity"~"school|kindergarten|clinic|library|bus_station|community_centre|university|college"](${s},${w},${n},${e});
+  way["waterway"~"river|canal"](${s},${w},${n},${e});
 );
-out center 400;`;
+out center 220;`;
     },
-    { attempts: 2, timeoutMs: 13000 },
+    { attempts: 2, timeoutMs: 10000 },
   );
+  const bundle = classifyAll(core);
 
-  let bundle = classifyAll(full);
-
-  // If full query starved roads/facilities, retry a lighter core query (no buildings).
-  if (!bundle.roads.length || (!bundle.facilities.length && !bundle.buildings.length)) {
-    const light = await overpassWithRetries(
-      place.south,
-      place.north,
-      place.west,
-      place.east,
-      (s, n, w, e) => {
-        const amenityParts = resolveAmenityParts(amenity, s, n, w, e);
-        return `[out:json][timeout:18];
-way["highway"~"trunk|primary|secondary|tertiary"](${s},${w},${n},${e});
-out geom 80;
-(${amenityParts};node["amenity"~"school|clinic|library|bus_station"](${s},${w},${n},${e}););
-out center 200;`;
-      },
-      { attempts: 2, timeoutMs: 12000 },
-    );
-    const lightBundle = classifyAll(light);
-    if (lightBundle.roads.length) bundle.roads = lightBundle.roads;
-    if (lightBundle.facilities.length) bundle.facilities = lightBundle.facilities;
-    if (lightBundle.communityAnchors.length && !bundle.communityAnchors.length) {
-      bundle.communityAnchors = lightBundle.communityAnchors;
+  // Phase 2 — demand enrichment (best-effort, single attempt, short timeout)
+  if (bundle.roads.length) {
+    try {
+      const enrich = await overpassQuery(
+        `[out:json][timeout:10];
+way["building"](${place.south},${place.west},${place.north},${place.east});
+out center 250;
+way["landuse"~"residential|industrial|military|quarry|landfill"](${place.south},${place.west},${place.north},${place.east});
+out center 80;`,
+        9000,
+      );
+      const extra = classifyAll(parseFeatures(enrich));
+      if (extra.buildings.length) bundle.buildings = extra.buildings;
+      if (extra.landuse.length) bundle.landuse = extra.landuse;
+    } catch {
+      /* buildings optional */
     }
   }
 
