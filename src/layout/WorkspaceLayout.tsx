@@ -1,28 +1,35 @@
 import { Group, Panel, Separator } from "react-resizable-panels";
-import { FilePlus2 } from "lucide-react";
+import { FilePlus2, X } from "lucide-react";
 import { useCallback, useRef, useState } from "react";
 import { hekaLogo as logo } from "../assets/hekaLogo";
-import { IMPORT_ACCEPT, importSpatialFile } from "../gis/importSpatialFile";
+import { isTauriRuntime, isWebRuntime } from "../config/aiGateway";
+import { importSpatialFile } from "../gis/importSpatialFile";
 import { GlobePanel } from "../panels/globe/GlobePanel";
+import { ReasoningInspectorPanel } from "../panels/inspector/ReasoningInspectorPanel";
 import { PlannerComposer } from "../panels/planner/PlannerComposer";
 import { useWorkspaceStore } from "../stores/useWorkspaceStore";
-import { isWebRuntime } from "../config/aiGateway";
 
 export function WorkspaceLayout() {
   const chatCollapsed = useWorkspaceStore((state) => state.chatCollapsed);
+  const inspectorOpen = useWorkspaceStore((state) => state.inspectorOpen);
+  const documents = useWorkspaceStore((state) => state.documents);
+  const activeDocumentId = useWorkspaceStore((state) => state.activeDocumentId);
+  const addDocument = useWorkspaceStore((state) => state.addDocument);
+  const closeDocument = useWorkspaceStore((state) => state.closeDocument);
+  const setActiveDocument = useWorkspaceStore((state) => state.setActiveDocument);
   const setHorizontalLayout = useWorkspaceStore((state) => state.setHorizontalLayout);
   const addResolvedMapLayer = useWorkspaceStore((state) => state.addResolvedMapLayer);
   const setCameraTarget = useWorkspaceStore((state) => state.setCameraTarget);
   const showToast = useWorkspaceStore((state) => state.showToast);
   const [dragging, setDragging] = useState(false);
+  const desktop = isTauriRuntime();
+  const web = isWebRuntime();
 
-  // Freeze default layout once — writing layout back into defaultLayout caused React #185
-  // (onLayoutChanged → setState → new defaultLayout → onLayoutChanged…).
-  const initialLayout = useRef({ canvas: 72, chat: 28 });
+  const initialLayout = useRef({ canvas: 58, chat: 27, inspector: 15 });
 
   const onLayoutChanged = useCallback((sizes: Record<string, number>) => {
-    const center = Math.round(sizes.canvas ?? 72);
-    const right = Math.round(sizes.chat ?? 28);
+    const center = Math.round(sizes.canvas ?? 58);
+    const right = Math.round((sizes.chat ?? 27) + (sizes.inspector ?? 0));
     const current = useWorkspaceStore.getState().workspace.layout;
     if (Math.abs(current.center - center) < 1 && Math.abs(current.right - right) < 1) return;
     setHorizontalLayout({ left: 0, center, right });
@@ -57,6 +64,14 @@ export function WorkspaceLayout() {
     }
   };
 
+  const onNewTab = () => {
+    if (web) {
+      showToast("Multi-document tabs ship in the full Windows IDE — download from the banner.");
+      return;
+    }
+    addDocument();
+  };
+
   const mapPane = (
     <section
       className={`tab-workspace ${dragging ? "drop-active" : ""}`}
@@ -70,27 +85,62 @@ export function WorkspaceLayout() {
       }}
     >
       <header className="tab-strip" aria-label="Workspace tabs">
-        <button className="workspace-tab active" type="button">
-          <img src={logo} alt="" /><span>Earth map</span>
-        </button>
+        {documents.map((doc) => (
           <button
-            className="new-tab"
+            key={doc.id}
+            className={`workspace-tab ${doc.id === activeDocumentId ? "active" : ""}`}
             type="button"
-            title="Multi-document tabs are in the full Windows IDE"
-            onClick={() => showToast(isWebRuntime()
-              ? "Multi-document tabs ship in the full Windows IDE — download from the banner."
-              : "Open another analysis tab from File or keep working on this map.")}
+            onClick={() => setActiveDocument(doc.id)}
+            onAuxClick={(event) => {
+              if (event.button === 1 && desktop) {
+                event.preventDefault();
+                closeDocument(doc.id);
+              }
+            }}
           >
-            <FilePlus2 size={16} />
+            <img src={logo} alt="" />
+            <span>{doc.title}</span>
+            {desktop && documents.length > 1 && (
+              <span
+                className="tab-close"
+                role="button"
+                tabIndex={0}
+                title="Close tab"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  closeDocument(doc.id);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.stopPropagation();
+                    closeDocument(doc.id);
+                  }
+                }}
+              >
+                <X size={12} />
+              </span>
+            )}
           </button>
+        ))}
+        <button
+          className="new-tab"
+          type="button"
+          title={web ? "Multi-document tabs are in the full Windows IDE" : "New map document"}
+          onClick={onNewTab}
+        >
+          <FilePlus2 size={16} />
+        </button>
       </header>
       <div className="tab-content">
         <GlobePanel />
         {dragging && (
           <div className="drop-overlay">
             <strong>Drop spatial files</strong>
-            <span>GeoJSON · KML · CSV · (Shapefile / GeoPackage / GeoTIFF — convert for web)</span>
-            <input type="file" accept={IMPORT_ACCEPT} multiple hidden />
+            <span>
+              {desktop
+                ? "GeoJSON · KML · CSV · Shapefile (.zip) · GeoPackage"
+                : "GeoJSON · KML · CSV · (Shapefile / GeoPackage — convert for web)"}
+            </span>
           </div>
         )}
       </div>
@@ -101,20 +151,30 @@ export function WorkspaceLayout() {
     return <div className="cursor-workspace">{mapPane}</div>;
   }
 
+  const showInspector = desktop && inspectorOpen;
+
   return (
     <Group
       className="cursor-workspace"
       orientation="horizontal"
-      defaultLayout={initialLayout.current}
+      defaultLayout={showInspector ? initialLayout.current : { canvas: 72, chat: 28 }}
       onLayoutChanged={onLayoutChanged}
     >
-      <Panel id="canvas" minSize="42%" defaultSize={initialLayout.current.canvas}>
+      <Panel id="canvas" minSize="36%" defaultSize={showInspector ? initialLayout.current.canvas : 72}>
         {mapPane}
       </Panel>
       <Separator className="chat-resize-handle" />
-      <Panel id="chat" minSize="22%" maxSize="48%" defaultSize={initialLayout.current.chat}>
+      <Panel id="chat" minSize="20%" maxSize="48%" defaultSize={showInspector ? initialLayout.current.chat : 28}>
         <PlannerComposer />
       </Panel>
+      {showInspector && (
+        <>
+          <Separator className="chat-resize-handle" />
+          <Panel id="inspector" minSize="14%" maxSize="34%" defaultSize={initialLayout.current.inspector}>
+            <ReasoningInspectorPanel />
+          </Panel>
+        </>
+      )}
     </Group>
   );
 }

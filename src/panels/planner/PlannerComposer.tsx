@@ -3,41 +3,29 @@ import { useEffect, useRef, useState } from "react";
 import { hekaLogo as logo } from "../../assets/hekaLogo";
 import { askEarth, exportEarthGeoJson, type EarthDiscovery, type EarthNextAction, type EarthResponse } from "../../earth/askEarth";
 import { checkPyQgisRuntime, executeSpatialPlan } from "../../execution/pyqgisExecution";
-import { isTauriRuntime } from "../../config/aiGateway";
+import { earthApiBaseUrl, isTauriRuntime } from "../../config/aiGateway";
 import { useWorkspaceStore } from "../../stores/useWorkspaceStore";
-import type { MapLayerKind, PlannerPlan } from "../../types/workspace";
+import type { DocumentChatMessage, MapLayerKind, PlannerPlan } from "../../types/workspace";
 
-type AssistantMessage = {
-  id: string;
-  role: "assistant";
-  variant: "full" | "note";
-  answer: string;
-  place: string;
-  confidence: number;
-  trace: Array<{ tool: string; summary: string }>;
-  criteria: Array<{ id: string; label: string; weight: number; source: string }>;
-  limitations: string[];
-  assumptions: string[];
-  candidates: Array<{
-    id: string;
-    rank: number;
-    lon: number;
-    lat: number;
-    score: number;
-    rationale: string;
-    factors?: Record<string, number>;
-    metrics?: Record<string, number | string>;
-  }>;
-  nextActions: EarthNextAction[];
-  discovery: EarthDiscovery;
-  dsl: Array<{ operation: string; label: string }>;
-  engineNote: string;
-  runtime: string;
-  raw: EarthResponse;
-  focusCandidateId?: string;
-};
+type AssistantMessage = Extract<DocumentChatMessage, { role: "assistant" }> & { raw: EarthResponse };
+type ChatMessage = DocumentChatMessage;
 
-type ChatMessage = { id: string; role: "user"; text: string } | AssistantMessage;
+function asAssistant(message: DocumentChatMessage): AssistantMessage | null {
+  if (message.role !== "assistant") return null;
+  const raw = (message.raw as EarthResponse | undefined) ?? {
+    answer: message.answer,
+    location: { name: message.place, lat: 0, lon: 0, bbox: [0, 0, 0, 0] },
+    criteria: message.criteria,
+    candidates: message.candidates.map((c) => ({ ...c, factors: c.factors ?? {} })),
+    layers: [],
+    assumptions: message.assumptions,
+    limitations: message.limitations,
+    confidence: message.confidence,
+    trace: message.trace,
+    next_actions: message.nextActions,
+  };
+  return { ...message, raw };
+}
 
 function earthToPlan(question: string, earth: EarthResponse): PlannerPlan {
   const dsl = (earth.dsl?.length
@@ -121,7 +109,7 @@ function explainScoring(message: AssistantMessage): string {
     const raw = top.factors?.[k] ?? 0;
     return `• ${k.replace(/_/g, " ")} — contribution ${contrib.toFixed(2)} (score ${raw.toFixed(2)})`;
   });
-  const metrics = top.metrics;
+  const metrics = (top as { metrics?: Record<string, number | string> }).metrics;
   const metricBits: string[] = [];
   if (metrics?.coverageGapMeters != null) metricBits.push(`~${(Number(metrics.coverageGapMeters) / 1000).toFixed(1)} km from nearest existing facility`);
   if (metrics?.buildingsWithin600m != null) metricBits.push(`${metrics.buildingsWithin600m} buildings within 600 m`);
@@ -139,7 +127,7 @@ function explainScoring(message: AssistantMessage): string {
     "In plain language: coverage gap and catchment demand lead; arterial access is only one secondary factor.",
     "",
     message.limitations.length
-      ? `Caveats:\n${message.limitations.slice(0, 3).map((l) => `• ${l}`).join("\n")}`
+      ? `Next direction:\n${message.limitations.slice(0, 3).map((l) => `• ${l}`).join("\n")}`
       : "",
   ].filter(Boolean).join("\n");
 }
@@ -180,14 +168,25 @@ const PENDING_STEPS = [
   "Finalize",
 ];
 
+const WELCOME_PROMPTS = [
+  "Where should I put a hospital in Calgary?",
+  "Where should I put a bridge in Lagos?",
+  "Where should I put an EV charger in Vancouver?",
+] as const;
+
 export function PlannerComposer() {
   const [question, setQuestion] = useState("");
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [liveTrace, setLiveTrace] = useState<Array<{ tool: string; status: "pending" | "active" | "done" }>>([]);
   const [selectedCandidateId, setSelectedCandidateId] = useState<string>();
+  const [qgisBusy, setQgisBusy] = useState(false);
   const threadRef = useRef<HTMLDivElement>(null);
   const lastFull = useRef<AssistantMessage | null>(null);
 
+  const activeDocumentId = useWorkspaceStore((state) => state.activeDocumentId);
+  const messages = useWorkspaceStore((state) =>
+    state.documents.find((doc) => doc.id === state.activeDocumentId)?.chatMessages ?? [],
+  );
+  const setActiveChatMessages = useWorkspaceStore((state) => state.setActiveChatMessages);
   const planner = useWorkspaceStore((state) => state.planner);
   const beginPlanning = useWorkspaceStore((state) => state.beginPlanning);
   const applyPlan = useWorkspaceStore((state) => state.applyPlan);
@@ -200,11 +199,83 @@ export function PlannerComposer() {
   const completeExecution = useWorkspaceStore((state) => state.completeExecution);
   const failExecution = useWorkspaceStore((state) => state.failExecution);
   const showToast = useWorkspaceStore((state) => state.showToast);
+  const qgisHealth = useWorkspaceStore((state) => state.qgisHealth);
   const selectedFeature = useWorkspaceStore((state) => state.execution.selectedFeature);
+
+  const setMessages = (updater: ChatMessage[] | ((prev: ChatMessage[]) => ChatMessage[])) => {
+    const current = useWorkspaceStore.getState().documents.find((doc) => doc.id === useWorkspaceStore.getState().activeDocumentId)?.chatMessages ?? [];
+    const next = typeof updater === "function" ? updater(current) : updater;
+    setActiveChatMessages(next);
+  };
+
+  useEffect(() => {
+    const last = [...messages].reverse().find((message) => message.role === "assistant" && message.variant === "full");
+    lastFull.current = last ? asAssistant(last) : null;
+  }, [messages, activeDocumentId]);
 
   useEffect(() => {
     threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages, planner.status, liveTrace]);
+  }, [messages, planner.status, liveTrace, activeDocumentId]);
+
+  // Warm server cache for Try asking prompts so first click is fast.
+  useEffect(() => {
+    let cancelled = false;
+    const warm = async () => {
+      try {
+        await fetch(`${earthApiBaseUrl()}/api/ask/warmup`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+      } catch {
+        for (const prompt of WELCOME_PROMPTS) {
+          if (cancelled) break;
+          try { await askEarth(prompt); } catch { /* ignore */ }
+          await new Promise((r) => setTimeout(r, 800));
+        }
+      }
+    };
+    const handle = window.setTimeout(() => { void warm(); }, 1200);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(handle);
+    };
+  }, []);
+
+  const wantsQgisOps = (dsl: Array<{ operation: string }>) =>
+    dsl.some((step) => ["Buffer", "Coverage", "Difference", "Intersect"].includes(step.operation));
+
+  const runQgisForPlan = async (plan: PlannerPlan) => {
+    if (!isTauriRuntime()) return;
+    setQgisBusy(true);
+    try {
+      const health = qgisHealth ?? await checkPyQgisRuntime();
+      if (!health.available) {
+        showToast("QGIS LTR not found — install OSGeo4W QGIS or set HEKA_QGIS_PYTHON to run Processing.");
+        return;
+      }
+      beginExecution();
+      const result = await executeSpatialPlan(plan);
+      completeExecution(result);
+      if (result.geojson) {
+        addResolvedMapLayer({
+          id: "qgis-result",
+          name: result.layerName,
+          kind: "candidates",
+          geojson: result.geojson,
+          featureCount: result.featureCount,
+          outputPath: result.outputPath,
+          source: "agent",
+        });
+      }
+      showToast(`QGIS finished · ${result.featureCount} features`);
+    } catch (error) {
+      failExecution(error instanceof Error ? error.message : "QGIS execution failed.");
+      showToast(error instanceof Error ? error.message : "QGIS execution failed.");
+    } finally {
+      setQgisBusy(false);
+    }
+  };
 
   const appendNote = (userText: string, answer: string) => {
     setMessages((prev) => [
@@ -243,12 +314,22 @@ export function PlannerComposer() {
     ]);
   };
 
-  const flyToCandidate = (candidate: AssistantMessage["candidates"][0]) => {
+  const flyToCandidate = (candidate: AssistantMessage["candidates"][0], all?: AssistantMessage["candidates"]) => {
     setSelectedCandidateId(candidate.id);
+    const peers = all?.length ? all : [candidate];
+    const lats = peers.map((c) => c.lat);
+    const lons = peers.map((c) => c.lon);
+    const latSpan = Math.max(...lats) - Math.min(...lats);
+    const lonSpan = Math.max(...lons) - Math.min(...lons);
+    const spanMeters = Math.max(latSpan, lonSpan) * 111_000;
+    // Tight zoom on #1; slightly wider when comparing a cluster.
+    const height = candidate.rank === 1
+      ? Math.min(14_000, Math.max(6_500, spanMeters * 1.4 || 8_500))
+      : Math.min(18_000, Math.max(8_000, spanMeters * 1.8 || 11_000));
     setCameraTarget({
       lon: candidate.lon,
       lat: candidate.lat,
-      height: candidate.rank === 1 ? 35_000 : 55_000,
+      height,
       label: `#${candidate.rank}`,
     });
   };
@@ -291,7 +372,7 @@ export function PlannerComposer() {
       factors: c.factors,
     }));
     setRankedCandidates(candidates);
-    if (candidates[0]) flyToCandidate(candidates[0]);
+    if (candidates[0]) flyToCandidate(candidates[0], candidates);
 
     const plan = earthToPlan(prompt, earth);
     applyPlan(plan);
@@ -318,28 +399,12 @@ export function PlannerComposer() {
     lastFull.current = assistant;
     setMessages((prev) => [...prev, assistant]);
 
-    if (isTauriRuntime() && candidates.length > 0) {
-      try {
-        const health = await checkPyQgisRuntime();
-        const wantsQgis = (earth.dsl ?? []).some((step) => ["Buffer", "Coverage", "Difference", "Intersect"].includes(step.operation));
-        if (health.available && wantsQgis) {
-          beginExecution();
-          const result = await executeSpatialPlan(plan);
-          completeExecution(result);
-          if (result.geojson) {
-            addResolvedMapLayer({
-              id: "qgis-result",
-              name: result.layerName,
-              kind: "candidates",
-              geojson: result.geojson,
-              featureCount: result.featureCount,
-              outputPath: result.outputPath,
-              source: "agent",
-            });
-          }
-        }
-      } catch (error) {
-        failExecution(error instanceof Error ? error.message : "QGIS execution failed.");
+    if (isTauriRuntime() && wantsQgisOps(earth.dsl ?? [])) {
+      const health = qgisHealth ?? await checkPyQgisRuntime();
+      if (health.available) {
+        await runQgisForPlan(plan);
+      } else {
+        showToast("Plan ready — install QGIS LTR to run Buffer/Coverage Processing, or keep the open-data map.");
       }
     }
   };
@@ -469,7 +534,7 @@ export function PlannerComposer() {
                 key={candidate.id}
                 type="button"
                 className={`candidate-row ${selectedCandidateId === candidate.id || (!selectedCandidateId && candidate.rank === 1) ? "selected" : ""}`}
-                onClick={() => flyToCandidate(candidate)}
+                onClick={() => flyToCandidate(candidate, message.candidates)}
               >
                 <span className={candidate.rank === 1 ? "rank top" : "rank"}>#{candidate.rank}</span>
                 <span className="cand-meta">
@@ -479,6 +544,22 @@ export function PlannerComposer() {
                 <Crosshair size={13} />
               </button>
             ))}
+          </div>
+        )}
+
+        {message.variant === "full" && isTauriRuntime() && wantsQgisOps(message.dsl) && (
+          <div className="next-actions">
+            <button
+              type="button"
+              className="next-action qgis-action"
+              disabled={qgisBusy || planner.status === "planning"}
+              onClick={() => {
+                const plan = planner.plan ?? earthToPlan(message.place || "analysis", message.raw);
+                void runQgisForPlan(plan);
+              }}
+            >
+              {qgisBusy ? "Running QGIS…" : qgisHealth?.available === false ? "QGIS unavailable — install LTR" : "Run in QGIS"}
+            </button>
           </div>
         )}
 
@@ -529,7 +610,7 @@ export function PlannerComposer() {
                   <details className="inner-details"><summary>Assumptions</summary>{message.assumptions.map((item) => <p key={item}>{item}</p>)}</details>
                 )}
                 {message.limitations.length > 0 && (
-                  <details className="inner-details"><summary>Limitations / proxies</summary>{message.limitations.map((item) => <p key={item}>{item}</p>)}</details>
+                  <details className="inner-details"><summary>Next direction</summary>{message.limitations.map((item) => <p key={item}>{item}</p>)}</details>
                 )}
                 {message.engineNote && <p className="engine-note">{message.engineNote}</p>}
               </div>
@@ -557,12 +638,7 @@ export function PlannerComposer() {
           <p>Ask a question about the physical world. Heka finds the data, runs spatial analysis when needed, and explains the result.</p>
           <p className="welcome-label">Try asking:</p>
           <ul className="welcome-prompts">
-            {[
-              "Where should Calgary build its next hospital?",
-              "Where is the safest place to build a bridge in Lagos?",
-              "Which neighbourhoods are underserved by fire stations?",
-              "Which areas of Vancouver are most vulnerable to flooding?",
-            ].map((prompt) => (
+            {WELCOME_PROMPTS.map((prompt) => (
               <li key={prompt}>
                 <button type="button" onClick={() => void submit(prompt)}>{prompt}</button>
               </li>
@@ -573,7 +649,10 @@ export function PlannerComposer() {
 
       {messages.map((message) => message.role === "user"
         ? <article className="user-message" key={message.id}>{message.text}</article>
-        : renderAssistant(message))}
+        : (() => {
+            const assistant = asAssistant(message);
+            return assistant ? renderAssistant(assistant) : null;
+          })())}
 
       {planner.status === "planning" && (
         <article className="assistant-message thinking-live progress-card">

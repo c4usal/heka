@@ -83,3 +83,26 @@
 .download-note{opacity:.85;font-size:12px!important}
 .download-meta{margin-top:8px;font-size:12px;color:#8bb5a8}
 @media(max-width:720px){.demo-banner{padding:10px 12px}.demo-banner-copy{font-size:11px}}
+
+/* Desktop IDE chrome */
+.menu-item{position:relative}
+.menu-dropdown{position:absolute;top:100%;left:0;z-index:30;min-width:180px;padding:6px;border:1px solid #d7d7d8;border-radius:8px;background:#fff;box-shadow:0 8px 24px #0002;display:grid;gap:2px}
+.menu-dropdown button{display:block;width:100%;text-align:left;border:0;background:transparent;color:#2f343a;padding:8px 10px;border-radius:5px;font-size:12px;cursor:pointer}
+.menu-dropdown button:hover{background:#eef6f3;color:#0f766e}
+.runtime-pill{margin-left:8px;padding:3px 8px;border-radius:999px;font-size:10px;font-weight:700;border:1px solid #d5e3de}
+.runtime-pill.ok{background:#eefaf5;color:#0f766e;border-color:#b7e4d5}
+.runtime-pill.warn{background:#fff7ed;color:#9a3412;border-color:#f5d0a8}
+.workspace-tab{position:relative;padding-right:28px}
+.workspace-tab .tab-close{position:absolute;right:6px;top:50%;transform:translateY(-50%);display:grid;place-items:center;width:18px;height:18px;border-radius:4px;color:#8b8f95}
+.workspace-tab .tab-close:hover{background:#e5e7eb;color:#111827}
+.inspector-panel{height:100%;overflow:auto;border-left:1px solid #e4e4e5;background:#fbfbfc;color:#2f343a}
+.inspector-panel>header{position:sticky;top:0;z-index:2;padding:12px 14px;border-bottom:1px solid #e4e4e5;background:#f7faf9}
+.inspector-panel>header span{display:block;font-size:10px;letter-spacing:.06em;color:#7a8580;font-weight:700}
+.inspector-panel>header strong{display:block;margin-top:4px;font-size:12px;color:#1f2937}
+.inspector-card{margin:10px 12px;padding:10px 12px;border:1px solid #e4e7ea;border-radius:8px;background:#fff}
+.inspector-card>div{display:flex;align-items:center;gap:6px;margin-bottom:6px;color:#168c71}
+.inspector-card h2{margin:0;font-size:11px;color:#374151}
+.inspector-card p{margin:0 0 6px;font-size:11px;line-height:1.45;color:#4b5563}
+.inspector-card .detail{font-size:10px;color:#6b7280}
+.inspector-card pre{margin:0;white-space:pre-wrap;font-size:10px;color:#374151;background:#f8faf9;padding:8px;border-radius:6px}
+.qgis-action{border-color:#99d5c3!important;background:#eef8f4!important;color:#0f766e!important;font-weight:700}

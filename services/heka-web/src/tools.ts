@@ -212,14 +212,28 @@ function storeThemeFeatures(session: AgentSession, theme: string, features: OsmF
   else session.facilities = features;
 }
 
+const bundleMemory = new Map<string, { expires: number; value: unknown }>();
+
 async function cachedFetchJson(env: ToolEnv, key: string, loader: () => Promise<unknown>, ttlSeconds = 3600): Promise<unknown> {
+  const mem = bundleMemory.get(key);
+  if (mem && mem.expires > Date.now()) return mem.value;
   if (env.EARTH_CACHE) {
     const hit = await env.EARTH_CACHE.get(key, "json");
-    if (hit) return hit;
+    if (hit) {
+      bundleMemory.set(key, { expires: Date.now() + ttlSeconds * 1000, value: hit });
+      return hit;
+    }
   }
   const value = await loader();
-  if (env.EARTH_CACHE) {
-    await env.EARTH_CACHE.put(key, JSON.stringify(value), { expirationTtl: ttlSeconds });
+  const isEmptyBundle = typeof value === "object" && value != null
+    && "roads" in value
+    && Array.isArray((value as { roads?: unknown[] }).roads)
+    && (value as { roads: unknown[] }).roads.length === 0;
+  if (!isEmptyBundle) {
+    bundleMemory.set(key, { expires: Date.now() + ttlSeconds * 1000, value });
+    if (env.EARTH_CACHE) {
+      void env.EARTH_CACHE.put(key, JSON.stringify(value), { expirationTtl: ttlSeconds });
+    }
   }
   return value;
 }
@@ -396,9 +410,9 @@ export async function executeTool(
     if (!session.buildings.length && !session.communityAnchors.length) {
       notes.push("Demand proxies thin this run — ranking leans on coverage gap + arterials.");
     }
-    const worldpop = await sampleWorldPop(env, session.place);
+    const worldpop = null as string | null; // skip remote WorldPop on the hot path (too slow for web demo)
     if (worldpop) notes.push(worldpop);
-    else notes.push("WorldPop key not configured or unavailable — not claiming census population.");
+    else notes.push("Next: wire WorldPop / census grids for stronger demand scoring.");
     session.demandNotes = notes;
     trace.push({ tool: name, summary: notes[0] });
     return { result: { notes } };

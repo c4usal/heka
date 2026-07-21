@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Cartesian2, Cartesian3, Color, ColorMaterialProperty, ConstantProperty, EllipsoidTerrainProvider, GeoJsonDataSource, HorizontalOrigin, ImageryLayer, JulianDate, LabelStyle, NearFarScalar, OpenStreetMapImageryProvider, Rectangle, ScreenSpaceEventType, VerticalOrigin, Viewer } from "cesium";
+import { Cartesian2, Cartesian3, Color, ColorMaterialProperty, ConstantProperty, EllipsoidTerrainProvider, GeoJsonDataSource, HeadingPitchRange, HorizontalOrigin, ImageryLayer, JulianDate, LabelStyle, NearFarScalar, OpenStreetMapImageryProvider, Rectangle, ScreenSpaceEventType, VerticalOrigin, Viewer } from "cesium";
 import "./mapViewer.css";
 import { Crosshair, Eye, EyeOff, Layers } from "lucide-react";
 import { useWorkspaceStore } from "../../stores/useWorkspaceStore";
@@ -147,7 +147,7 @@ export function GlobePanel() {
             horizontalOrigin: HorizontalOrigin.CENTER,
             pixelOffset: new Cartesian2(0, isTop ? -28 : -18),
             disableDepthTestDistance: Number.POSITIVE_INFINITY,
-            scaleByDistance: new NearFarScalar(400, 1.35, 35000, 0.65),
+            scaleByDistance: new NearFarScalar(200, 1.45, 18000, 0.75),
           } as any;
         }
       });
@@ -155,13 +155,28 @@ export function GlobePanel() {
       return { layer, source, visible: true };
     })).then((records) => {
       sources.current = records; setLayers(records);
-      const preferred = records.find((record) => record.layer.kind === "candidates")
-        ?? records.find((record) => record.layer.kind === "coverage")
-        ?? records[0];
+      const candidates = records.find((record) => record.layer.kind === "candidates");
+      if (candidates) {
+        const top = candidates.source.entities.values.find((entity) => {
+          const rank = entity.properties?.rank?.getValue?.(JulianDate.now());
+          const isTop = entity.properties?.isTopPick?.getValue?.(JulianDate.now());
+          return isTop === true || rank === 1;
+        }) ?? candidates.source.entities.values[0];
+        if (top) {
+          void viewer.current?.flyTo(top, {
+            duration: 1.15,
+            offset: new HeadingPitchRange(0, -0.85, 9_500),
+          });
+          return;
+        }
+      }
+      // If a tight camera target was already set for #1, don't yank out to full city layers.
+      if (cameraTarget) return;
+      const preferred = records.find((record) => record.layer.kind === "coverage") ?? records[0];
       if (preferred) void viewer.current?.flyTo(preferred.source, { duration: 1.25 });
       else if (mapFocus) void viewer.current?.camera.flyTo({ destination: Rectangle.fromDegrees(mapFocus.west, mapFocus.south, mapFocus.east, mapFocus.north), duration: 1.2 });
     }).catch(() => setError("Heka could not display the GeoJSON layers on the globe."));
-  }, [result, resolvedMapLayers, mapFocus]);
+  }, [result, resolvedMapLayers, mapFocus, cameraTarget]);
 
   const toggleLayer = (id: string) => setLayers((current) => current.map((record) => {
     if (record.layer.id !== id) return record;
@@ -171,8 +186,19 @@ export function GlobePanel() {
 
   const focusLayer = (id?: string) => {
     const visible = layers.filter((record) => record.visible);
+    const candidates = visible.find((record) => record.layer.kind === "candidates");
+    if (!id && candidates) {
+      const top = candidates.source.entities.values.find((entity) => {
+        const rank = entity.properties?.rank?.getValue?.(JulianDate.now());
+        return rank === 1 || entity.properties?.isTopPick?.getValue?.(JulianDate.now()) === true;
+      }) ?? candidates.source.entities.values[0];
+      if (top) {
+        void viewer.current?.flyTo(top, { duration: 1.0, offset: new HeadingPitchRange(0, -0.85, 9_500) });
+        return;
+      }
+    }
     const primary = (id ? visible.find((record) => record.layer.id === id) : undefined)
-      ?? visible.find((record) => record.layer.kind === "candidates")
+      ?? candidates
       ?? visible.find((record) => record.layer.kind === "coverage")
       ?? visible[0];
     if (primary) void viewer.current?.flyTo(primary.source, { duration: 1.1 });

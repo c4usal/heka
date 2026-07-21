@@ -3,9 +3,9 @@
 const UA = "Heka Web/0.1 (https://github.com/c4usal/heka; spatial IDE for hackathon demos)";
 
 const OVERPASS_ENDPOINTS = [
+  "https://lz4.overpass-api.de/api/interpreter",
   "https://overpass.kumi.systems/api/interpreter",
   "https://overpass-api.de/api/interpreter",
-  "https://overpass.osm.ch/api/interpreter",
 ];
 
 export type PlaceFocus = {
@@ -112,7 +112,7 @@ export async function geocodeScope(geographicScope: string): Promise<PlaceFocus>
 
 async function overpassQuery(query: string, timeoutMs = 10000): Promise<{ elements?: unknown[] }> {
   let lastError = "OpenStreetMap search failed on every mirror.";
-  // Try at most 2 mirrors to stay inside Worker budgets.
+  // Prefer first mirror; fall over once if empty/slow.
   for (const endpoint of OVERPASS_ENDPOINTS.slice(0, 2)) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -128,8 +128,8 @@ async function overpassQuery(query: string, timeoutMs = 10000): Promise<{ elemen
         continue;
       }
       const payload = await response.json() as { elements?: unknown[]; remark?: string };
-      if ((!payload.elements || payload.elements.length === 0) && payload.remark) {
-        lastError = `Overpass incomplete: ${payload.remark}`;
+      if (!payload.elements?.length) {
+        lastError = payload.remark ? `Overpass incomplete: ${payload.remark}` : `Overpass empty from ${endpoint}`;
         continue;
       }
       return payload;
@@ -447,8 +447,8 @@ function resolveAmenityParts(amenity: string, s: number, n: number, w: number, e
 }
 
 /**
- * Light-first facility evidence: roads + target + activity anchors.
- * Optional short buildings pass — never block the response on footprints.
+ * Fast facility evidence: ONE Overpass round-trip, hard time budget.
+ * Target: finish well under 15s even on cold mirrors.
  */
 export async function fetchFacilitySitingBundle(place: PlaceFocus, amenity = "hospital"): Promise<FacilitySitingBundle> {
   const empty = (): FacilitySitingBundle => ({
@@ -462,54 +462,66 @@ export async function fetchFacilitySitingBundle(place: PlaceFocus, amenity = "ho
       if (!bucket) continue;
       bundle[bucket].push(feature);
     }
-    bundle.roads = bundle.roads.slice(0, 90);
-    bundle.facilities = bundle.facilities.slice(0, 120);
-    bundle.buildings = bundle.buildings.slice(0, 280);
-    bundle.communityAnchors = bundle.communityAnchors.slice(0, 120);
-    bundle.landuse = bundle.landuse.slice(0, 80);
-    bundle.waterways = bundle.waterways.slice(0, 60);
+    bundle.roads = bundle.roads.slice(0, 60);
+    bundle.facilities = bundle.facilities.slice(0, 80);
+    bundle.buildings = bundle.buildings.slice(0, 200);
+    bundle.communityAnchors = bundle.communityAnchors.slice(0, 80);
+    bundle.landuse = bundle.landuse.slice(0, 40);
+    bundle.waterways = bundle.waterways.slice(0, 40);
     return bundle;
   };
 
-  // Phase 1 — core evidence (must succeed quickly)
-  const core = await overpassWithRetries(
-    place.south,
-    place.north,
-    place.west,
-    place.east,
-    (s, n, w, e) => {
-      const amenityParts = resolveAmenityParts(amenity, s, n, w, e);
-      return `[out:json][timeout:15];
-way["highway"~"trunk|primary|secondary|tertiary"](${s},${w},${n},${e});
-out geom 70;
+  const amenityParts = resolveAmenityParts(amenity, place.south, place.north, place.west, place.east);
+  const coreQuery = `[out:json][timeout:8];
+way["highway"~"trunk|primary|secondary|tertiary"](${place.south},${place.west},${place.north},${place.east});
+out geom 45;
 (
   ${amenityParts};
-  node["amenity"~"school|kindergarten|clinic|library|bus_station|community_centre|university|college"](${s},${w},${n},${e});
-  way["amenity"~"school|kindergarten|clinic|library|bus_station|community_centre|university|college"](${s},${w},${n},${e});
-  way["waterway"~"river|canal"](${s},${w},${n},${e});
+  node["amenity"~"school|clinic|library|bus_station"](${place.south},${place.west},${place.north},${place.east});
+  way["amenity"~"school|clinic|library|bus_station"](${place.south},${place.west},${place.north},${place.east});
 );
-out center 220;`;
-    },
-    { attempts: 2, timeoutMs: 10000 },
-  );
-  const bundle = classifyAll(core);
+out center 160;`;
+  const buildingQuery = `[out:json][timeout:5];way["building"](around:4500,${place.lat},${place.lon});out center 160;`;
 
-  // Phase 2 — demand enrichment (best-effort, single attempt, short timeout)
-  if (bundle.roads.length) {
+  const [corePayload, buildingPayload] = await Promise.all([
+    overpassQuery(coreQuery, 10000).catch(() => null),
+    overpassQuery(buildingQuery, 6000).catch(() => null),
+  ]);
+
+  let core: Feature[] = corePayload ? parseFeatures(corePayload) : [];
+  if (!core.length) {
     try {
-      const enrich = await overpassQuery(
-        `[out:json][timeout:10];
-way["building"](${place.south},${place.west},${place.north},${place.east});
-out center 250;
-way["landuse"~"residential|industrial|military|quarry|landfill"](${place.south},${place.west},${place.north},${place.east});
-out center 80;`,
-        9000,
-      );
-      const extra = classifyAll(parseFeatures(enrich));
-      if (extra.buildings.length) bundle.buildings = extra.buildings;
-      if (extra.landuse.length) bundle.landuse = extra.landuse;
+      core = parseFeatures(await overpassQuery(
+        `[out:json][timeout:7];
+way["highway"~"primary|secondary|tertiary"](${place.south},${place.west},${place.north},${place.east});
+out geom 35;
+(${amenityParts};);
+out center 100;`,
+        8000,
+      ));
     } catch {
-      /* buildings optional */
+      return empty();
+    }
+  }
+
+  const bundle = classifyAll(core);
+  if (buildingPayload) {
+    const extra = classifyAll(parseFeatures(buildingPayload));
+    if (extra.buildings.length) bundle.buildings = extra.buildings;
+  }
+
+  if (bundle.roads.length && bundle.facilities.length < 2 && !/charg|ev/.test(amenity.toLowerCase())) {
+    try {
+      const wideParts = resolveAmenityParts(amenity, place.south, place.north, place.west, place.east)
+        .replace(/\([^)]+\)/g, `(around:12000,${place.lat},${place.lon})`);
+      const widen = parseFeatures(await overpassQuery(
+        `[out:json][timeout:6];(${wideParts};);out center 50;`,
+        7000,
+      ));
+      const more = classifyAll(widen);
+      if (more.facilities.length > bundle.facilities.length) bundle.facilities = more.facilities;
+    } catch {
+      /* optional */
     }
   }
 

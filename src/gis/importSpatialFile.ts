@@ -1,5 +1,8 @@
 /** Parse common spatial uploads into GeoJSON FeatureCollections for the globe. */
 
+import { invoke } from "@tauri-apps/api/core";
+import { isTauriRuntime } from "../config/aiGateway";
+
 type Feature = {
   type: "Feature";
   properties: Record<string, unknown>;
@@ -96,6 +99,31 @@ function parseKml(text: string, filename: string): ImportResult {
   return { ok: true, name: basename(filename), geojson: featureCollection(features), featureCount: features.length, format: "KML" };
 }
 
+type ConvertResult = { name: string; geojson: string; featureCount: number; format: string };
+
+async function convertViaQgis(file: File): Promise<ImportResult> {
+  try {
+    const buffer = new Uint8Array(await file.arrayBuffer());
+    const bytes = Array.from(buffer);
+    const result = await invoke<ConvertResult>("convert_spatial_to_geojson", {
+      request: { fileName: file.name, bytes },
+    });
+    return {
+      ok: true,
+      name: result.name || basename(file.name),
+      geojson: result.geojson,
+      featureCount: result.featureCount,
+      format: result.format,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      message: message || "Could not convert this file. Install QGIS LTR (OSGeo4W) or convert to GeoJSON first.",
+    };
+  }
+}
+
 export async function importSpatialFile(file: File): Promise<ImportResult> {
   const name = file.name;
   const lower = name.toLowerCase();
@@ -109,25 +137,25 @@ export async function importSpatialFile(file: File): Promise<ImportResult> {
   if (lower.endsWith(".csv") || lower.endsWith(".tsv")) {
     return parseCsv(await file.text(), name);
   }
-  if (lower.endsWith(".zip") || lower.endsWith(".shp")) {
+  if (lower.endsWith(".zip") || lower.endsWith(".shp") || lower.endsWith(".gpkg") || lower.endsWith(".geopackage")) {
+    if (isTauriRuntime()) {
+      return convertViaQgis(file);
+    }
     return {
       ok: false,
       comingSoon: true,
-      message: "Shapefile: on the web demo, convert to GeoJSON first (mapshaper.org or QGIS). Full Shapefile import ships with the desktop install.",
-    };
-  }
-  if (lower.endsWith(".gpkg") || lower.endsWith(".geopackage")) {
-    return {
-      ok: false,
-      comingSoon: true,
-      message: "GeoPackage: convert to GeoJSON for the web demo. Desktop Heka will open .gpkg natively.",
+      message: lower.includes("gpkg")
+        ? "GeoPackage: convert to GeoJSON for the web demo. Desktop Heka opens .gpkg via QGIS."
+        : "Shapefile: on the web demo, convert to GeoJSON first (mapshaper.org or QGIS). Full Shapefile import ships with the desktop install.",
     };
   }
   if (lower.endsWith(".tif") || lower.endsWith(".tiff") || lower.endsWith(".geotiff")) {
     return {
       ok: false,
       comingSoon: true,
-      message: "GeoTIFF: raster preview is coming soon. For the web demo, use a vector export (GeoJSON) or the desktop IDE.",
+      message: isTauriRuntime()
+        ? "GeoTIFF raster preview is not ready yet — export a vector layer (GeoJSON) or use QGIS alongside Heka."
+        : "GeoTIFF: raster preview is coming soon. For the web demo, use a vector export (GeoJSON) or the desktop IDE.",
     };
   }
   if (lower.endsWith(".kmz")) {
@@ -140,7 +168,7 @@ export async function importSpatialFile(file: File): Promise<ImportResult> {
 
   return {
     ok: false,
-    message: `Unsupported format (${name}). Try GeoJSON, KML, or CSV with lon/lat columns.`,
+    message: `Unsupported format (${name}). Try GeoJSON, KML, CSV${isTauriRuntime() ? ", Shapefile, or GeoPackage" : ""}.`,
   };
 }
 

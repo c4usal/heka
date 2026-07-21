@@ -198,10 +198,13 @@ export function expertSiteNarrative(input: {
   const activity = metrics.activityAnchorsWithin800m;
 
   const whyBits = ranked.map(([k]) => factorPhrase(k, themeLabel));
-  const gapLarge = gapKm != null && Number(gapKm) >= 1.2;
-  const primaryWhy = (lead === "undersupply" || gapLarge)
-    ? `This site closes a meaningful gap in current ${themeLabel} coverage${gapKm ? ` (~${gapKm} km from the nearest mapped facility)` : ""} while remaining on accessible arterials and serving areas with higher estimated demand.`
-    : `This site offers the best balance among the open-data factors we can measure: ${whyBits.join("; ")}.`;
+  const isBridge = themeLabel === "bridge" || "river_proximity" in candidate.factors || "bridge_gap" in candidate.factors;
+  const gapLarge = !isBridge && gapKm != null && Number(gapKm) >= 1.2;
+  const primaryWhy = isBridge
+    ? `This crossing contender ranks well because it ${whyBits.join("; it ")}.`
+    : (lead === "undersupply" || gapLarge)
+      ? `This site closes a meaningful gap in current ${themeLabel} coverage${gapKm ? ` (~${gapKm} km from the nearest mapped facility)` : ""} while remaining on accessible arterials and serving areas with higher estimated demand.`
+      : `This site offers the best balance among the open-data factors we can measure: ${whyBits.join("; ")}.`;
 
   const evidence: string[] = [];
   if (facilityCount) evidence.push(`${facilityCount} mapped ${themeLabel}${facilityCount === 1 ? "" : "s"} in the working area`);
@@ -216,7 +219,7 @@ export function expertSiteNarrative(input: {
     "",
     `Based on available open datasets (${evidence.join("; ")}), it ranks highest on unmet coverage vs catchment need — not merely because a road is nearby.`,
     "",
-    "Honest limits: this is an open-map multi-criteria sketch (OSM + proxies), not a formal municipal siting study. Zoning, parcel ownership, capital cost, and official demographics are not in this run.",
+    "Next direction: treat this as an open-data sketch, then validate with zoning, parcel ownership, capital cost, and official demographics.",
   ].join("\n");
 }
 
@@ -235,18 +238,20 @@ export function scoreSites(input: ScoreSitesInput): ScoreSitesResult {
   const themeLabel = input.themeLabel ?? "facility";
 
   if (!buildingPoints.length) {
-    limitations.push("Building footprints were thin — demand leans more on community activity anchors and arterial class.");
+    limitations.push("Next: densify building / residential samples to strengthen demand ranking.");
   }
   if (!carePoints.length && input.mode === "facility") {
-    limitations.push("No community activity anchors mapped nearby — activity factor weakened.");
+    limitations.push("Next: pull more community activity anchors (schools, shops, transit) for catchment signal.");
   }
   if (input.mode === "facility" && !facilityPoints.length) {
-    limitations.push("No existing facilities mapped in the working area — ranking is greenfield (demand + activity + access).");
+    limitations.push("Next: confirm greenfield ranking against any local facility inventory you have.");
+  }
+  if (input.mode === "facility" && !waterSegments.length) {
+    limitations.push("Next: import an official floodplain layer if flood exposure matters for this site.");
   }
   if (input.mode === "facility") {
-    limitations.push("Flood risk is a waterway-proximity proxy, not an official floodplain map.");
-    limitations.push("Demand uses OSM buildings + community activity anchors — not census demographics or capacity.");
-    limitations.push("Coverage uses straight-line distance, not network travel time.");
+    limitations.push("Next: add census / WorldPop demand grids beyond OSM building proxies.");
+    limitations.push("Next: run drive-time / ORS isochrones instead of straight-line coverage rings.");
   }
 
   type Draft = {

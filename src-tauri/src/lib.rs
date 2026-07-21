@@ -297,8 +297,8 @@ fn element_to_feature(element: &serde_json::Value) -> Option<serde_json::Value> 
 
 #[tauri::command]
 fn runtime_health() -> RuntimeHealth {
-    let launcher = std::env::var("HEKA_QGIS_PYTHON").unwrap_or_else(|_| r"C:\OSGeo4W\bin\python-qgis-ltr.bat".to_string());
-    RuntimeHealth { available: std::path::Path::new(&launcher).exists(), backend: "PyQGIS / QGIS Processing".into(), detail: launcher }
+    let launcher = qgis_launcher();
+    RuntimeHealth { available: std::path::Path::new(&launcher).exists() || ogr2ogr_path().is_some(), backend: "PyQGIS / QGIS Processing".into(), detail: launcher }
 }
 
 #[tauri::command]
@@ -534,6 +534,99 @@ async fn discover_facility_gap_context(request: FacilityGapRequest) -> Result<Fa
     })
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConvertSpatialRequest {
+    file_name: String,
+    bytes: Vec<u8>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConvertSpatialResult {
+    name: String,
+    geojson: String,
+    feature_count: usize,
+    format: String,
+}
+
+fn qgis_launcher() -> String {
+    std::env::var("HEKA_QGIS_PYTHON").unwrap_or_else(|_| r"C:\OSGeo4W\bin\python-qgis-ltr.bat".to_string())
+}
+
+fn ogr2ogr_path() -> Option<std::path::PathBuf> {
+    let candidates = [
+        std::path::PathBuf::from(r"C:\OSGeo4W\bin\ogr2ogr.exe"),
+        std::path::PathBuf::from(r"C:\Program Files\QGIS 3.40.5\bin\ogr2ogr.exe"),
+        std::path::PathBuf::from(r"C:\Program Files\QGIS 3.34.13\bin\ogr2ogr.exe"),
+    ];
+    candidates.into_iter().find(|path| path.exists())
+}
+
+#[tauri::command]
+async fn convert_spatial_to_geojson(request: ConvertSpatialRequest) -> Result<ConvertSpatialResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let lower = request.file_name.to_lowercase();
+        let format = if lower.ends_with(".gpkg") || lower.ends_with(".geopackage") {
+            "GeoPackage"
+        } else if lower.ends_with(".zip") || lower.ends_with(".shp") {
+            "Shapefile"
+        } else {
+            "Spatial"
+        };
+        let launcher = qgis_launcher();
+        let ogr = ogr2ogr_path();
+        if !std::path::Path::new(&launcher).exists() && ogr.is_none() {
+            return Err("QGIS LTR / OSGeo4W was not found. Install QGIS or set HEKA_QGIS_PYTHON to convert Shapefile and GeoPackage.".into());
+        }
+
+        let temp_root = std::env::temp_dir().join(format!("heka-import-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_root);
+        std::fs::create_dir_all(&temp_root).map_err(|error| format!("Could not create temp import folder: {error}"))?;
+        let input_path = temp_root.join(&request.file_name);
+        std::fs::write(&input_path, &request.bytes).map_err(|error| format!("Could not stage import file: {error}"))?;
+        let output_path = temp_root.join("converted.geojson");
+
+        let status = if let Some(ogr_bin) = ogr {
+            Command::new(ogr_bin)
+                .args([
+                    "-f", "GeoJSON",
+                    "-t_srs", "EPSG:4326",
+                    "-lco", "RFC7946=YES",
+                    &output_path.to_string_lossy(),
+                    &input_path.to_string_lossy(),
+                ])
+                .status()
+                .map_err(|error| format!("ogr2ogr failed to start: {error}"))?
+        } else {
+            let py = format!(
+                "from osgeo import ogr, osr\nimport sys\nin_path=r'''{}'''\nout_path=r'''{}'''\nsrc=ogr.Open(in_path)\nif src is None:\n    raise SystemExit('Could not open input dataset')\ndriver=ogr.GetDriverByName('GeoJSON')\nif driver is None:\n    raise SystemExit('GeoJSON driver missing')\nif driver.CreateDataSource(out_path) is None:\n    pass\nosr.DontUseExceptions()\nfrom osgeo import gdal\ngdal.VectorTranslate(out_path, in_path, format='GeoJSON', dstSRS='EPSG:4326', layerCreationOptions=['RFC7946=YES'])\n",
+                input_path.to_string_lossy().replace('\\', "\\\\"),
+                output_path.to_string_lossy().replace('\\', "\\\\"),
+            );
+            let script_path = temp_root.join("convert.py");
+            std::fs::write(&script_path, py).map_err(|error| error.to_string())?;
+            Command::new("cmd")
+                .args(["/C", launcher.as_str(), &script_path.to_string_lossy()])
+                .status()
+                .map_err(|error| format!("QGIS Python convert failed to start: {error}"))?
+        };
+
+        if !status.success() {
+            let _ = std::fs::remove_dir_all(&temp_root);
+            return Err(format!("Could not convert {} with GDAL/QGIS (exit {}).", request.file_name, status.code().unwrap_or(-1)));
+        }
+        let geojson = std::fs::read_to_string(&output_path).map_err(|error| format!("Converted GeoJSON missing: {error}"))?;
+        let feature_count = geojson.matches("\"type\": \"Feature\"").count()
+            .max(geojson.matches("\"type\":\"Feature\"").count());
+        let name = request.file_name.rsplit(['/', '\\']).next().unwrap_or(&request.file_name)
+            .rsplit_once('.').map(|(stem, _)| stem.replace(['_', '-'], " "))
+            .unwrap_or_else(|| request.file_name.clone());
+        let _ = std::fs::remove_dir_all(&temp_root);
+        Ok(ConvertSpatialResult { name, geojson, feature_count, format: format.into() })
+    }).await.map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
 async fn execute_spatial_plan(app: AppHandle, request: ExecutionRequest) -> Result<ExecutionResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -547,7 +640,7 @@ async fn execute_spatial_plan(app: AppHandle, request: ExecutionRequest) -> Resu
                 .find(|candidate| candidate.exists())
                 .ok_or("The bundled PyQGIS worker could not be found.")?
         };
-        let launcher = std::env::var("HEKA_QGIS_PYTHON").unwrap_or_else(|_| r"C:\OSGeo4W\bin\python-qgis-ltr.bat".to_string());
+        let launcher = qgis_launcher();
         if !std::path::Path::new(&launcher).exists() { return Err("QGIS LTR was not found. Install QGIS through OSGeo4W or set HEKA_QGIS_PYTHON to python-qgis-ltr.bat.".into()); }
         let input = serde_json::json!({ "action": "execute-plan", "plan": request.plan, "dataDirectory": request.data_directory, "outputPath": request.output_path }).to_string();
         let script_path = script.to_string_lossy().to_string();
@@ -574,7 +667,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .invoke_handler(tauri::generate_handler![runtime_health, request_groq_planner, geocode_place, discover_osm_dataset, discover_bridge_siting_context, discover_facility_gap_context, execute_spatial_plan])
+        .invoke_handler(tauri::generate_handler![runtime_health, request_groq_planner, geocode_place, discover_osm_dataset, discover_bridge_siting_context, discover_facility_gap_context, convert_spatial_to_geojson, execute_spatial_plan])
         .run(tauri::generate_context!())
         .expect("error while running Heka");
 }

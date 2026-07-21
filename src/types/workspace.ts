@@ -22,3 +22,45 @@ export interface ExecutionResult { layerName: string; geojson: string; outputPat
 export interface ExecutionState { status: "idle" | "running" | "complete" | "error"; stage?: string; progress: number; detail?: string; result?: ExecutionResult; selectedFeature?: SelectedMapFeature; error?: string; }
 export interface PanelLayout { left: number; center: number; right: number; bottom: number; }
 export interface Workspace { activeProject: Project; activeSection: NavigationSection; layout: PanelLayout; isSidebarCollapsed: boolean; }
+
+/** Serializable chat turn stored per document tab (desktop multi-doc). */
+export type DocumentChatMessage =
+  | { id: string; role: "user"; text: string }
+  | {
+      id: string;
+      role: "assistant";
+      variant: "full" | "note";
+      answer: string;
+      place: string;
+      confidence: number;
+      trace: Array<{ tool: string; summary: string }>;
+      criteria: Array<{ id: string; label: string; weight: number; source: string }>;
+      limitations: string[];
+      assumptions: string[];
+      candidates: RankedCandidate[];
+      nextActions: Array<{ label: string; action: string }>;
+      discovery: {
+        need: Array<{ id: string; label: string; connector?: string; status?: string; featureCount?: number; reason?: string }>;
+        found: Array<{ id: string; label: string; connector?: string; status?: string; featureCount?: number; reason?: string }>;
+        missing: Array<{ id: string; label: string; connector?: string; status?: string; featureCount?: number; reason?: string }>;
+      };
+      dsl: Array<{ operation: string; label: string }>;
+      engineNote: string;
+      runtime: string;
+      raw?: unknown;
+    };
+
+export interface DocumentTab {
+  id: string;
+  title: string;
+  layers: MapLayer[];
+  cameraTarget?: CameraTarget;
+  rankedCandidates: RankedCandidate[];
+  chatMessages: DocumentChatMessage[];
+}
+
+export interface QgisRuntimeHealth {
+  available: boolean;
+  backend: string;
+  detail: string;
+}

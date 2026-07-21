@@ -49,7 +49,7 @@ function detectIntent(question: string): Intent {
   ) {
     return "siting_facility";
   }
-  if (facility && /\b(where|best|should|recommend|site)\b/.test(q)) return "siting_facility";
+  if (facility && /\b(where|best|should|recommend|site|build)\b/.test(q)) return "siting_facility";
   if (/\b(in|near|around|at)\s+[A-Z]/.test(question) || /\b(calgary|lagos|lethbridge|london|toronto|vancouver)\b/i.test(q)) {
     if (/\b(map|flood|road|dangerous|hazard|crime|safe|park|bridge|hospital)\b/.test(q)) return "place_research";
   }
@@ -58,6 +58,8 @@ function detectIntent(question: string): Intent {
 }
 
 function extractPlaceHint(question: string): string | null {
+  const shouldBuild = question.match(/\bshould\s+([A-Z][A-Za-z.-]{2,40})\s+build\b/);
+  if (shouldBuild?.[1]) return shouldBuild[1].trim();
   const inMatch = question.match(/\bin\s+([A-Z][A-Za-z\s.-]{1,40}?)(?:\s+considering|\s+to\b|\s+and\b|\?|,|$)/);
   if (inMatch?.[1]) return inMatch[1].trim();
   if (/lethbridge/i.test(question)) return "Lethbridge";
@@ -287,13 +289,21 @@ export async function runEarthAgent(question: string, env: ToolEnv): Promise<Ear
     });
   }
 
-  const search = await webSearch(question, { includeGithub: false });
-  trace.push({
-    tool: "web_search",
-    summary: search.hits.length
-      ? `Open web: ${search.hits.length} hits`
-      : "Open web: no hits (continuing with other evidence)",
-  });
+  // Siting path: skip open-web entirely (it adds latency and off-topic snippets like "Calvary Hospital").
+  const isSiting = intent === "siting_facility" || intent === "siting_bridge";
+  const search: WebSearchResult = isSiting
+    ? { query: question, hits: [], summaryLines: [] }
+    : await webSearch(question, { includeGithub: false });
+  if (!isSiting) {
+    trace.push({
+      tool: "web_search",
+      summary: search.hits.length
+        ? `Open web: ${search.hits.length} hits`
+        : "Open web: no hits (continuing with other evidence)",
+    });
+  } else {
+    trace.push({ tool: "web_search", summary: "Skipped — siting uses open-map evidence only" });
+  }
 
   if (intent === "chat") {
     const q = question.toLowerCase().trim();
@@ -372,25 +382,31 @@ export async function runEarthAgent(question: string, env: ToolEnv): Promise<Ear
 
   const session = createSession();
   let runtime: EarthResponse["runtime"] = "open-data-tools";
-  let engineNote = "Web search + open-data GIS tools. Desktop IDE can also run QGIS Processing.";
+  let engineNote = isSiting
+    ? "Fast siting path — OSM multi-criteria score (no web digression)."
+    : "Web search + open-data GIS tools. Desktop IDE can also run QGIS Processing.";
 
   try {
-    const evidenceResult = await executeTool("plan_evidence", { question }, session, env, trace);
-    const evidence = evidenceResult.result as ReturnType<typeof planEvidenceNeeds>;
+    // Skip evidence planner LLM/tool chatter on siting — heuristic is enough and much faster.
+    const evidence = isSiting
+      ? { plan: [] as ReturnType<typeof planEvidenceNeeds>["plan"] }
+      : ((await executeTool("plan_evidence", { question }, session, env, trace)).result as ReturnType<typeof planEvidenceNeeds>);
 
-    // Skip planner LLM for clear siting — heuristic is unbiased across facility types and saves ~12s.
     let plan = heuristicPlan(question, intent);
     if (!plan.place) plan = heuristicPlan(question, intent);
-    if (intent !== "siting_facility" && plan.themes.length && detectFacilityTheme(question) && !intent.startsWith("siting")) {
-      plan = heuristicPlan(question, intent);
-    }
     trace.push({ tool: "earth_planner", summary: `Plan ${plan.mode} @ ${plan.place}; themes=${plan.themes.join(",") || "roads"}` });
 
     await executeTool("geocode_place", { query: plan.place }, session, env, trace);
 
     if (plan.mode === "facility" && plan.themes[0]) {
       await executeTool("load_siting_bundle", { amenity: plan.themes[0] }, session, env, trace);
-      await executeTool("sample_demand", { note: "proxy" }, session, env, trace);
+      // Local notes only — no remote WorldPop on the hot path.
+      const notes: string[] = [];
+      if (session.buildings.length) notes.push(`Next: refine with denser building samples (${session.buildings.length} loaded).`);
+      if (session.communityAnchors.length) notes.push(`Next: enrich activity anchors (${session.communityAnchors.length} loaded).`);
+      if (!session.buildings.length) notes.push("Next: densify OSM buildings / census for demand.");
+      session.demandNotes = notes;
+      trace.push({ tool: "sample_demand", summary: notes[0] ?? "Demand proxies from bundle" });
     } else if (plan.mode === "bridge") {
       await Promise.all([
         executeTool("osm_features", { theme: "roads", layerName: "Arterial roads" }, session, env, trace),
@@ -398,9 +414,8 @@ export async function runEarthAgent(question: string, env: ToolEnv): Promise<Ear
         executeTool("osm_features", { theme: "bridges", layerName: "Bridges" }, session, env, trace),
       ]);
     } else {
-      // Inventory / place research — keep it light and fast
       await executeTool("osm_features", { theme: "roads", layerName: "Arterial roads" }, session, env, trace);
-      const extras = plan.themes.filter((t) => t !== "roads").slice(0, 2);
+      const extras = plan.themes.filter((t) => t !== "roads").slice(0, 1);
       for (const theme of extras) {
         await executeTool("osm_features", { theme, layerName: theme.replace(/_/g, " ") }, session, env, trace);
       }
@@ -426,77 +441,82 @@ export async function runEarthAgent(question: string, env: ToolEnv): Promise<Ear
     const placeNote = plan.placeDefaulted
       ? `Note: no city was specified — used ${plan.place} as a default demo place. Ask again with an explicit city for a better run.`
       : "";
-    let gisBlurb = `Mapped ${session.layers.length} open layers around ${placeName}.`;
+
+    let answer: string;
     if (top) {
-      gisBlurb = `GIS_RECOMMENDATION:\n${expertSiteNarrative({
+      answer = expertSiteNarrative({
         placeName,
         themeLabel: plan.themeLabel,
         candidate: top,
         weights: plan.weights,
         facilityCount: session.facilities.length,
         serviceRadiusMeters: plan.serviceRadiusMeters,
-      })}${placeNote ? `\n${placeNote}` : ""}`;
-    } else if (session.layers.length) {
-      gisBlurb = `Mapped open layers around ${placeName}: ${session.layers.map((l) => `${l.name} (${l.featureCount})`).join(", ")}. ${placeNote}`;
-    }
-
-    const narrated = await narrateWithLlm(
-      env,
-      question,
-      search,
-      `${gisBlurb}\nLimitations: ${(session.lastLimitations ?? []).slice(0, 3).join("; ")}\nPlace: ${placeName}`,
-    );
-
-    let answer = narrated;
-    if (!answer) {
-      if (top) {
-        answer = expertSiteNarrative({
-          placeName,
-          themeLabel: plan.themeLabel,
-          candidate: top,
-          weights: plan.weights,
-          facilityCount: session.facilities.length,
-          serviceRadiusMeters: plan.serviceRadiusMeters,
-        });
-        if (placeNote) answer = `${answer}\n\n${placeNote}`;
-      } else if (intent === "place_research" && /dangerous|crime|hazard/i.test(question)) {
+      });
+      if (placeNote) answer = `${answer}\n\n${placeNote}`;
+      // Never append open-web snippets to siting answers — they derail the recommendation.
+    } else {
+      let gisBlurb = `Mapped ${session.layers.length} open layers around ${placeName}.`;
+      if (session.layers.length) {
+        gisBlurb = `Mapped open layers around ${placeName}: ${session.layers.map((l) => `${l.name} (${l.featureCount})`).join(", ")}. ${placeNote}`;
+      }
+      if (isSiting) {
         answer = [
-          search.directAnswer || search.hits[0]?.snippet || `I researched “${question}” on the open web.`,
+          `I mapped open layers around ${placeName} but could not rank candidates this turn (missing roads or facilities).`,
           "",
-          `I mapped available open layers around ${placeName}, but I won’t invent a single “most dangerous” pin — official crime/flood scores aren’t in this connector set.`,
-          "",
-          "Ask a concrete siting question if you want ranked candidates.",
-        ].join("\n");
-      } else if (session.layers.length) {
-        answer = [
-          `Here’s an open-map view of ${placeName}.`,
-          "",
-          `Loaded: ${session.layers.map((l) => `${l.name} (${l.featureCount})`).join(", ")}.`,
-          "",
-          search.directAnswer || "Ask a concrete siting question (park, school, fire station, hospital, EV charger, bridge…) for ranked candidates.",
+          "Try again in a moment, or ask with a clearer city name.",
         ].join("\n");
       } else {
-        answer = [
-          `I looked this up on the open web around ${placeName}.`,
-          "",
-          search.directAnswer || search.hits[0]?.snippet || "",
-          "",
-          "Ask a concrete siting question if you want ranked candidates.",
-        ].filter(Boolean).join("\n");
+        const narrated = await narrateWithLlm(
+          env,
+          question,
+          search,
+          `${gisBlurb}\nNext direction: ${(session.lastLimitations ?? []).slice(0, 3).join("; ")}\nPlace: ${placeName}`,
+        );
+        if (narrated) {
+          answer = narrated;
+        } else if (intent === "place_research" && /dangerous|crime|hazard/i.test(question)) {
+          answer = [
+            search.directAnswer || search.hits[0]?.snippet || `I researched “${question}” on the open web.`,
+            "",
+            `I mapped available open layers around ${placeName}, but I won’t invent a single “most dangerous” pin — official crime/flood scores aren’t in this connector set.`,
+            "",
+            "Ask a concrete siting question if you want ranked candidates.",
+          ].join("\n");
+        } else if (session.layers.length) {
+          answer = [
+            `Here’s an open-map view of ${placeName}.`,
+            "",
+            `Loaded: ${session.layers.map((l) => `${l.name} (${l.featureCount})`).join(", ")}.`,
+            "",
+            search.directAnswer || "Ask a concrete siting question (park, school, fire station, hospital, EV charger, bridge…) for ranked candidates.",
+          ].join("\n");
+        } else {
+          answer = [
+            `I looked this up on the open web around ${placeName}.`,
+            "",
+            search.directAnswer || search.hits[0]?.snippet || "",
+            "",
+            "Ask a concrete siting question if you want ranked candidates.",
+          ].filter(Boolean).join("\n");
+        }
       }
     }
 
     const finalized = await executeTool("finalize_answer", {
       answer,
       assumptions: [
-        "Open-web search is the primary evidence skill.",
-        "Facility siting uses one multi-criteria model (coverage gap, demand, community activity, access, flood proxy, growth, suitability) for every amenity type.",
+        isSiting
+          ? "Siting ranks open-map evidence only (OSM) — no web digression."
+          : "Open-web search is the primary evidence skill for non-siting questions.",
+        "Facility siting uses one multi-criteria model for every amenity type.",
       ],
       limitations: [
-        ...(session.lastLimitations ?? []),
-        ...session.demandNotes.filter((n) => /proxy|not configured|deferred|thin/i.test(n)),
-      ],
-      confidence: Math.min(88, (session.lastConfidence ?? 50) + (search.hits.length ? 6 : 0)),
+        ...(session.lastLimitations ?? []).map((l) => (l.startsWith("Next") ? l : `Next: ${l}`)),
+        ...session.demandNotes
+          .filter((n) => /Next:|proxy|thin|densif/i.test(n))
+          .map((n) => (n.startsWith("Next") ? n : `Next: ${n}`)),
+      ].slice(0, 4),
+      confidence: Math.min(88, (session.lastConfidence ?? 50) + (session.buildings.length ? 6 : 0) + (session.facilities.length ? 4 : 0)),
       next_actions: top
         ? [
             { label: "Explain scoring", action: "explain_scoring" },
@@ -523,13 +543,24 @@ export async function runEarthAgent(question: string, env: ToolEnv): Promise<Ear
       trace,
       next_actions: base.next_actions ?? [],
       dsl: buildDsl(plan, session),
-      discovery: buildDiscovery(evidence, session, search),
+      discovery: buildDiscovery(evidence as ReturnType<typeof planEvidenceNeeds>, session, search),
       runtime,
       engineNote,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     trace.push({ tool: "runtime", summary: message });
+    if (isSiting) {
+      return emptyResponse({
+        answer: `Siting hit a data timeout (${message}). Try the same ask again — repeats are cached and usually much faster.`,
+        confidence: 35,
+        limitations: [`Next: retry — open-map mirrors were slow (${message}).`],
+        discovery: { need: [], found: [], missing: [{ id: "gis", label: "gis pipeline", reason: message }] },
+        trace,
+        runtime: "open-data-tools-fallback",
+        engineNote: "Fast siting path failed on open-map fetch.",
+      });
+    }
     const narrated = await narrateWithLlm(env, question, search, `GIS path failed: ${message}. Answer from web.`);
     return emptyResponse({
       answer: narrated ?? synthesizeFromSearch(question, search),
