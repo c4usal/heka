@@ -14,6 +14,14 @@ struct ExecutionRequest { data_directory: Option<String>, output_path: Option<St
 #[serde(rename_all = "camelCase")]
 struct GroqPlannerRequest { body: serde_json::Value, gateway_url: Option<String> }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OsmDiscoveryRequest { dataset_name: String, geographic_scope: String }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OsmDiscoveryResult { source_name: String, feature_count: usize, detail: String }
+
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MapLayer { id: String, name: String, kind: String, geojson: String, feature_count: i64, output_path: String }
@@ -63,6 +71,36 @@ async fn request_groq_planner(request: GroqPlannerRequest) -> Result<serde_json:
 }
 
 #[tauri::command]
+async fn discover_osm_dataset(request: OsmDiscoveryRequest) -> Result<OsmDiscoveryResult, String> {
+    let name = request.dataset_name.to_lowercase();
+    let filter = if name.contains("road") || name.contains("street") { "[\"highway\"]" }
+        else if name.contains("charger") || name.contains("charging") { "[\"amenity\"=\"charging_station\"]" }
+        else if name.contains("school") { "[\"amenity\"=\"school\"]" }
+        else if name.contains("hospital") { "[\"amenity\"=\"hospital\"]" }
+        else if name.contains("fire station") { "[\"amenity\"=\"fire_station\"]" }
+        else if name.contains("park") { "[\"leisure\"=\"park\"]" }
+        else { return Err("Heka can currently inspect OpenStreetMap sources for roads, chargers, schools, hospitals, fire stations, and parks.".into()); };
+    let client = reqwest::Client::new();
+    let place = client.get("https://nominatim.openstreetmap.org/search")
+        .header("User-Agent", "Heka Dataset Resolver/0.1 (https://github.com/c4usal/heka)")
+        .query(&[("q", request.geographic_scope.as_str()), ("format", "jsonv2"), ("limit", "1")])
+        .timeout(std::time::Duration::from_secs(15)).send().await.map_err(|error| format!("Location lookup failed: {error}"))?
+        .json::<serde_json::Value>().await.map_err(|error| format!("Location lookup returned unreadable JSON: {error}"))?;
+    let bounding = place.as_array().and_then(|items| items.first()).and_then(|item| item.get("boundingbox")).and_then(|value| value.as_array()).ok_or("Heka could not locate the requested geographic scope.")?;
+    let south = bounding.get(0).and_then(|v| v.as_str()).ok_or("Invalid location bounds.")?;
+    let north = bounding.get(1).and_then(|v| v.as_str()).ok_or("Invalid location bounds.")?;
+    let west = bounding.get(2).and_then(|v| v.as_str()).ok_or("Invalid location bounds.")?;
+    let east = bounding.get(3).and_then(|v| v.as_str()).ok_or("Invalid location bounds.")?;
+    let query = format!("[out:json][timeout:25];nwr{filter}({south},{west},{north},{east});out center;");
+    let payload = client.post("https://overpass-api.de/api/interpreter")
+        .header("User-Agent", "Heka Dataset Resolver/0.1 (https://github.com/c4usal/heka)")
+        .form(&[("data", query)]).timeout(std::time::Duration::from_secs(35)).send().await.map_err(|error| format!("OpenStreetMap search failed: {error}"))?
+        .json::<serde_json::Value>().await.map_err(|error| format!("OpenStreetMap returned unreadable JSON: {error}"))?;
+    let count = payload.get("elements").and_then(|items| items.as_array()).map_or(0, Vec::len);
+    Ok(OsmDiscoveryResult { source_name: "OpenStreetMap / Overpass".into(), feature_count: count, detail: "Preview only: select an approved source before importing it into the project.".into() })
+}
+
+#[tauri::command]
 async fn execute_spatial_plan(app: AppHandle, request: ExecutionRequest) -> Result<ExecutionResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let development_script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../worker/heka_worker.py");
@@ -102,7 +140,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .invoke_handler(tauri::generate_handler![runtime_health, request_groq_planner, execute_spatial_plan])
+        .invoke_handler(tauri::generate_handler![runtime_health, request_groq_planner, discover_osm_dataset, execute_spatial_plan])
         .run(tauri::generate_context!())
         .expect("error while running Heka");
 }

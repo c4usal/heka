@@ -5,13 +5,14 @@ import { hekaLogo as logo } from "../../assets/hekaLogo";
 import { executeSpatialPlan, type ExecutionProgress } from "../../execution/pyqgisExecution";
 import { planWithOmniRoute } from "../../planner/omniRoutePlanner";
 import { transformPlannerOutput } from "../../planner/planTransforms";
+import { resolvePlanDatasets } from "../../datasets/datasetResolver";
 import { useWorkspaceStore } from "../../stores/useWorkspaceStore";
 import type { PlannerPlan } from "../../types/workspace";
 
 export function PlannerComposer() {
   const [question, setQuestion] = useState("");
   const [submittedQuestion, setSubmittedQuestion] = useState<string>();
-  const { planner, execution, beginPlanning, applyPlan, failPlanning, completeTimelineStep, beginExecution, updateExecution, completeExecution, failExecution } = useWorkspaceStore();
+  const { planner, execution, beginPlanning, applyPlan, setDatasetResolutions, failPlanning, completeTimelineStep, beginExecution, updateExecution, completeExecution, failExecution } = useWorkspaceStore();
   const execute = async (plan: PlannerPlan) => {
     beginExecution(); let unlisten: (() => void) | undefined;
     try { unlisten = await listen<ExecutionProgress>("heka://execution-progress", (event) => updateExecution(event.payload.stage, event.payload.percent, event.payload.detail)); completeExecution(await executeSpatialPlan(plan)); }
@@ -25,6 +26,7 @@ export function PlannerComposer() {
       const output = await planWithOmniRoute(prompt);
       const plan = transformPlannerOutput(prompt, output);
       applyPlan(plan);
+      setDatasetResolutions(resolvePlanDatasets(plan));
       [0, 1, 2, 3, 4, 5, 6].forEach((index) => window.setTimeout(() => completeTimelineStep(index), index * 180));
       if (plan.executionReadiness === "ready") await execute(plan);
     } catch (error) { failPlanning(error instanceof Error ? error.message : "The planner failed unexpectedly."); }
