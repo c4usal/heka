@@ -127,11 +127,8 @@ async function searchDuckDuckGoInstant(query: string): Promise<WebHit[]> {
 }
 
 async function searchDuckDuckGo(query: string): Promise<WebHit[]> {
-  const instant = await searchDuckDuckGoInstant(query);
-  if (instant.length) return instant;
-  const html = await fetchText(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`);
-  if (!html) return [];
-  return parseDuckDuckGoHtml(html);
+  // Instant API only — HTML scrape is too slow for the Worker hot path.
+  return searchDuckDuckGoInstant(query);
 }
 
 async function wikiSummary(title: string, url?: string): Promise<WebHit | null> {
@@ -167,7 +164,7 @@ async function searchWikipedia(query: string): Promise<WebHit[]> {
     const payload = JSON.parse(open) as [string, string[], string[], string[]];
     const titles = payload[1] ?? [];
     const urls = payload[3] ?? [];
-    const settled = await Promise.all(titles.slice(0, 3).map((title, i) => wikiSummary(title, urls[i])));
+    const settled = await Promise.all(titles.slice(0, 2).map((title, i) => wikiSummary(title, urls[i])));
     return settled.filter((h): h is WebHit => !!h && !!h.snippet);
   } catch {
     return [];
@@ -291,15 +288,22 @@ export async function webSearch(query: string, options?: { includeGithub?: boole
   const primary = queries[0];
   const secondary = queries[1];
 
-  const [ddg, wiki, ddg2, wiki2, github] = await Promise.all([
+  // Primary wiki + DDG first; only fan out secondary if primary is thin.
+  const [ddg, wiki, github] = await Promise.all([
     searchDuckDuckGo(primary),
     searchWikipedia(primary),
-    secondary ? searchDuckDuckGo(secondary) : Promise.resolve([] as WebHit[]),
-    secondary ? searchWikipedia(secondary) : Promise.resolve([] as WebHit[]),
     includeGithub ? searchGitHub(primary) : Promise.resolve([] as WebHit[]),
   ]);
 
-  // Prefer Wikipedia extracts, then DDG abstracts, then secondary, then GitHub
+  let ddg2: WebHit[] = [];
+  let wiki2: WebHit[] = [];
+  if (secondary && wiki.length + ddg.length < 2) {
+    [ddg2, wiki2] = await Promise.all([
+      searchDuckDuckGo(secondary),
+      searchWikipedia(secondary),
+    ]);
+  }
+
   const hits = dedupeHits([...wiki, ...wiki2, ...ddg, ...ddg2, ...github]).slice(0, 10);
   const summaryLines = hits.slice(0, 8).map((hit) => {
     const bit = hit.snippet ? ` — ${hit.snippet}` : "";

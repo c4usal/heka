@@ -214,9 +214,25 @@ function storeThemeFeatures(session: AgentSession, theme: string, features: OsmF
 
 const bundleMemory = new Map<string, { expires: number; value: unknown }>();
 
+function earthDataRequest(key: string): Request {
+  return new Request(`https://heka-earth-data.internal/v1?k=${encodeURIComponent(key)}`, { method: "GET" });
+}
+
 async function cachedFetchJson(env: ToolEnv, key: string, loader: () => Promise<unknown>, ttlSeconds = 3600): Promise<unknown> {
   const mem = bundleMemory.get(key);
   if (mem && mem.expires > Date.now()) return mem.value;
+
+  try {
+    const hit = await caches.default.match(earthDataRequest(key));
+    if (hit) {
+      const value = await hit.json();
+      bundleMemory.set(key, { expires: Date.now() + ttlSeconds * 1000, value });
+      return value;
+    }
+  } catch {
+    /* Cache API best-effort */
+  }
+
   if (env.EARTH_CACHE) {
     const hit = await env.EARTH_CACHE.get(key, "json");
     if (hit) {
@@ -224,6 +240,7 @@ async function cachedFetchJson(env: ToolEnv, key: string, loader: () => Promise<
       return hit;
     }
   }
+
   const value = await loader();
   const isEmptyBundle = typeof value === "object" && value != null
     && "roads" in value
@@ -231,6 +248,19 @@ async function cachedFetchJson(env: ToolEnv, key: string, loader: () => Promise<
     && (value as { roads: unknown[] }).roads.length === 0;
   if (!isEmptyBundle) {
     bundleMemory.set(key, { expires: Date.now() + ttlSeconds * 1000, value });
+    try {
+      await caches.default.put(
+        earthDataRequest(key),
+        new Response(JSON.stringify(value), {
+          headers: {
+            "Content-Type": "application/json",
+            "Cache-Control": `public, max-age=${ttlSeconds}`,
+          },
+        }),
+      );
+    } catch {
+      /* ignore */
+    }
     if (env.EARTH_CACHE) {
       void env.EARTH_CACHE.put(key, JSON.stringify(value), { expirationTtl: ttlSeconds });
     }
@@ -426,7 +456,7 @@ export async function executeTool(
       env,
       cacheKey,
       () => fetchFacilitySitingBundle(session.place!, amenity),
-      7200,
+      21_600,
     ) as Awaited<ReturnType<typeof fetchFacilitySitingBundle>>;
 
     session.roads = bundle.roads;

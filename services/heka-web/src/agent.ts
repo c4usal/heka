@@ -64,10 +64,14 @@ function extractPlaceHint(question: string): string | null {
   if (inMatch?.[1]) return inMatch[1].trim();
   if (/lethbridge/i.test(question)) return "Lethbridge";
   if (/calgary/i.test(question)) return "Calgary";
+  if (/edmonton/i.test(question)) return "Edmonton";
   if (/lagos/i.test(question)) return "Lagos";
   if (/london/i.test(question)) return "London";
   if (/toronto/i.test(question)) return "Toronto";
   if (/vancouver/i.test(question)) return "Vancouver";
+  if (/ottawa/i.test(question)) return "Ottawa";
+  if (/montreal|montréal/i.test(question)) return "Montreal";
+  if (/winnipeg/i.test(question)) return "Winnipeg";
   return null;
 }
 
@@ -97,7 +101,7 @@ async function narrateWithLlm(
 ): Promise<string | null> {
   const gateway = env.AI_GATEWAY_URL.replace(/\/$/, "");
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 14000);
+  const timer = setTimeout(() => controller.abort(), 8000);
   try {
     const response = await fetch(`${gateway}/v1/chat/completions`, {
       method: "POST",
@@ -107,7 +111,7 @@ async function narrateWithLlm(
         model: "earth-narrator",
         temperature: 0.3,
         stream: false,
-        max_tokens: 900,
+        max_tokens: 500,
         response_format: {
           type: "json_schema",
           json_schema: {
@@ -289,23 +293,18 @@ export async function runEarthAgent(question: string, env: ToolEnv): Promise<Ear
     });
   }
 
-  // Siting path: skip open-web entirely (it adds latency and off-topic snippets like "Calvary Hospital").
+  // Siting path: skip open-web entirely (latency + off-topic snippets).
   const isSiting = intent === "siting_facility" || intent === "siting_bridge";
-  const search: WebSearchResult = isSiting
-    ? { query: question, hits: [], summaryLines: [] }
-    : await webSearch(question, { includeGithub: false });
-  if (!isSiting) {
+
+  if (intent === "chat") {
+    const search = await webSearch(question, { includeGithub: false });
     trace.push({
       tool: "web_search",
       summary: search.hits.length
         ? `Open web: ${search.hits.length} hits`
         : "Open web: no hits (continuing with other evidence)",
     });
-  } else {
-    trace.push({ tool: "web_search", summary: "Skipped — siting uses open-map evidence only" });
-  }
 
-  if (intent === "chat") {
     const q = question.toLowerCase().trim();
     if (/^[a-z]{6,}$/i.test(q) && !/[aeiou]{2}/.test(q) && !/\b(the|and|what|where|how|why)\b/.test(q)) {
       return emptyResponse({
@@ -349,15 +348,22 @@ export async function runEarthAgent(question: string, env: ToolEnv): Promise<Ear
       });
     }
 
-    const narrated = await narrateWithLlm(
-      env,
-      question,
-      search,
-      search.hits.length
-        ? "No GIS run — answer from open web + knowledge."
-        : "Open-web search returned no hits. Answer from well-established general knowledge if the question is factual; say clearly when you are unsure. Do not invent GIS analysis.",
-    );
-    const answer = narrated ?? synthesizeFromSearch(question, search);
+    // Prefer deterministic synthesis when we already have a direct extract — skips LLM RTT.
+    let answer: string;
+    let narrated: string | null = null;
+    if (search.directAnswer) {
+      answer = synthesizeFromSearch(question, search);
+    } else {
+      narrated = await narrateWithLlm(
+        env,
+        question,
+        search,
+        search.hits.length
+          ? "No GIS run — answer from open web + knowledge."
+          : "Open-web search returned no hits. Answer from well-established general knowledge if the question is factual; say clearly when you are unsure. Do not invent GIS analysis.",
+      );
+      answer = narrated ?? synthesizeFromSearch(question, search);
+    }
     return emptyResponse({
       answer,
       confidence: search.hits.length ? 80 : (narrated ? 62 : 40),
@@ -384,10 +390,14 @@ export async function runEarthAgent(question: string, env: ToolEnv): Promise<Ear
   let runtime: EarthResponse["runtime"] = "open-data-tools";
   let engineNote = isSiting
     ? "Fast siting path — OSM multi-criteria score (no web digression)."
-    : "Web search + open-data GIS tools. Desktop IDE can also run QGIS Processing.";
+    : "Web search + open-data GIS tools (parallel). Desktop IDE can also run QGIS Processing.";
+
+  // Run open-web and GIS in parallel for place research (siting skips web).
+  const searchPromise: Promise<WebSearchResult> = isSiting
+    ? Promise.resolve({ query: question, hits: [], summaryLines: [] })
+    : webSearch(question, { includeGithub: false });
 
   try {
-    // Skip evidence planner LLM/tool chatter on siting — heuristic is enough and much faster.
     const evidence = isSiting
       ? { plan: [] as ReturnType<typeof planEvidenceNeeds>["plan"] }
       : ((await executeTool("plan_evidence", { question }, session, env, trace)).result as ReturnType<typeof planEvidenceNeeds>);
@@ -396,45 +406,58 @@ export async function runEarthAgent(question: string, env: ToolEnv): Promise<Ear
     if (!plan.place) plan = heuristicPlan(question, intent);
     trace.push({ tool: "earth_planner", summary: `Plan ${plan.mode} @ ${plan.place}; themes=${plan.themes.join(",") || "roads"}` });
 
-    await executeTool("geocode_place", { query: plan.place }, session, env, trace);
+    const gisWork = (async () => {
+      await executeTool("geocode_place", { query: plan.place }, session, env, trace);
 
-    if (plan.mode === "facility" && plan.themes[0]) {
-      await executeTool("load_siting_bundle", { amenity: plan.themes[0] }, session, env, trace);
-      // Local notes only — no remote WorldPop on the hot path.
-      const notes: string[] = [];
-      if (session.buildings.length) notes.push(`Next: refine with denser building samples (${session.buildings.length} loaded).`);
-      if (session.communityAnchors.length) notes.push(`Next: enrich activity anchors (${session.communityAnchors.length} loaded).`);
-      if (!session.buildings.length) notes.push("Next: densify OSM buildings / census for demand.");
-      session.demandNotes = notes;
-      trace.push({ tool: "sample_demand", summary: notes[0] ?? "Demand proxies from bundle" });
-    } else if (plan.mode === "bridge") {
-      await Promise.all([
-        executeTool("osm_features", { theme: "roads", layerName: "Arterial roads" }, session, env, trace),
-        executeTool("osm_features", { theme: "waterways", layerName: "Waterways" }, session, env, trace),
-        executeTool("osm_features", { theme: "bridges", layerName: "Bridges" }, session, env, trace),
-      ]);
-    } else {
-      await executeTool("osm_features", { theme: "roads", layerName: "Arterial roads" }, session, env, trace);
-      const extras = plan.themes.filter((t) => t !== "roads").slice(0, 1);
-      for (const theme of extras) {
-        await executeTool("osm_features", { theme, layerName: theme.replace(/_/g, " ") }, session, env, trace);
+      if (plan.mode === "facility" && plan.themes[0]) {
+        await executeTool("load_siting_bundle", { amenity: plan.themes[0] }, session, env, trace);
+        const notes: string[] = [];
+        if (session.buildings.length) notes.push(`Next: refine with denser building samples (${session.buildings.length} loaded).`);
+        if (session.communityAnchors.length) notes.push(`Next: enrich activity anchors (${session.communityAnchors.length} loaded).`);
+        if (!session.buildings.length) notes.push("Next: densify OSM buildings / census for demand.");
+        session.demandNotes = notes;
+        trace.push({ tool: "sample_demand", summary: notes[0] ?? "Demand proxies from bundle" });
+      } else if (plan.mode === "bridge") {
+        await Promise.all([
+          executeTool("osm_features", { theme: "roads", layerName: "Arterial roads" }, session, env, trace),
+          executeTool("osm_features", { theme: "waterways", layerName: "Waterways" }, session, env, trace),
+          executeTool("osm_features", { theme: "bridges", layerName: "Bridges" }, session, env, trace),
+        ]);
+      } else {
+        await executeTool("osm_features", { theme: "roads", layerName: "Arterial roads" }, session, env, trace);
+        const extras = plan.themes.filter((t) => t !== "roads").slice(0, 1);
+        for (const theme of extras) {
+          await executeTool("osm_features", { theme, layerName: theme.replace(/_/g, " ") }, session, env, trace);
+        }
       }
-    }
 
-    const canScore = (plan.mode === "facility" && session.roads.length)
-      || (plan.mode === "bridge" && session.waterways.length && session.roads.length);
-    if (canScore) {
-      await executeTool("score_sites", {
-        mode: plan.mode === "bridge" ? "bridge" : "facility",
-        themeLabel: plan.themeLabel,
-        topN: 5,
-        serviceRadiusMeters: plan.serviceRadiusMeters,
-        weights: plan.weights,
-      }, session, env, trace);
+      const canScore = (plan.mode === "facility" && session.roads.length)
+        || (plan.mode === "bridge" && session.waterways.length && session.roads.length);
+      if (canScore) {
+        await executeTool("score_sites", {
+          mode: plan.mode === "bridge" ? "bridge" : "facility",
+          themeLabel: plan.themeLabel,
+          topN: 5,
+          serviceRadiusMeters: plan.serviceRadiusMeters,
+          weights: plan.weights,
+        }, session, env, trace);
+      } else {
+        trace.push({ tool: "score_sites", summary: "Skipped ranking — research/inventory mode or missing layers" });
+      }
+      await executeTool("emit_map_layers", {}, session, env, trace);
+    })();
+
+    const [search] = await Promise.all([searchPromise, gisWork]);
+    if (!isSiting) {
+      trace.push({
+        tool: "web_search",
+        summary: search.hits.length
+          ? `Open web: ${search.hits.length} hits`
+          : "Open web: no hits (continuing with other evidence)",
+      });
     } else {
-      trace.push({ tool: "score_sites", summary: "Skipped ranking — research/inventory mode or missing layers" });
+      trace.push({ tool: "web_search", summary: "Skipped — siting uses open-map evidence only" });
     }
-    await executeTool("emit_map_layers", {}, session, env, trace);
 
     const placeName = session.place?.displayName ?? plan.place;
     const top = session.lastCandidates?.[0];
@@ -453,7 +476,6 @@ export async function runEarthAgent(question: string, env: ToolEnv): Promise<Ear
         serviceRadiusMeters: plan.serviceRadiusMeters,
       });
       if (placeNote) answer = `${answer}\n\n${placeNote}`;
-      // Never append open-web snippets to siting answers — they derail the recommendation.
     } else {
       let gisBlurb = `Mapped ${session.layers.length} open layers around ${placeName}.`;
       if (session.layers.length) {
@@ -465,6 +487,14 @@ export async function runEarthAgent(question: string, env: ToolEnv): Promise<Ear
           "",
           "Try again in a moment, or ask with a clearer city name.",
         ].join("\n");
+      } else if (search.directAnswer) {
+        answer = [
+          synthesizeFromSearch(question, search),
+          "",
+          session.layers.length
+            ? `Also mapped: ${session.layers.map((l) => `${l.name} (${l.featureCount})`).join(", ")}.`
+            : "",
+        ].filter(Boolean).join("\n");
       } else {
         const narrated = await narrateWithLlm(
           env,
@@ -561,7 +591,10 @@ export async function runEarthAgent(question: string, env: ToolEnv): Promise<Ear
         engineNote: "Fast siting path failed on open-map fetch.",
       });
     }
-    const narrated = await narrateWithLlm(env, question, search, `GIS path failed: ${message}. Answer from web.`);
+    const search = await searchPromise.catch(() => ({ query: question, hits: [], summaryLines: [] } as WebSearchResult));
+    const narrated = search.directAnswer
+      ? null
+      : await narrateWithLlm(env, question, search, `GIS path failed: ${message}. Answer from web.`);
     return emptyResponse({
       answer: narrated ?? synthesizeFromSearch(question, search),
       confidence: 40,
