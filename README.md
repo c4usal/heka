@@ -317,9 +317,9 @@ Secrets remain on Cloudflare Workers and are never shipped to the client.
 
 # Hackathon Track
 
-**Developer Tools**
+**Work & Productivity**
 
-Heka is a developer tool for GIS professionals.
+
 
 It transforms complex spatial analysis into a conversational workflow while keeping every dataset, computation, and assumption transparent.
 
