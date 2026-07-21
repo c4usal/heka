@@ -12,3 +12,11 @@ ui-dev.log
 services/ai-gateway/.wrangler/
 services/ai-gateway/worker-configuration.d.ts
 .DS_Store
+
+services/heka-web/.wrangler/
+services/heka-web/worker-configuration.d.ts
+
+
+Heka_*.zip
+dist-release/
+

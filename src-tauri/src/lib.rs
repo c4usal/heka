@@ -16,11 +16,34 @@ struct GroqPlannerRequest { body: serde_json::Value, gateway_url: Option<String>
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct OsmDiscoveryRequest { dataset_name: String, geographic_scope: String }
+struct OsmDiscoveryRequest { dataset_name: String, geographic_scope: String, #[serde(default)] kind: Option<String> }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-struct OsmDiscoveryResult { source_name: String, feature_count: usize, detail: String, geojson: String, output_path: String }
+struct PlaceFocus {
+    display_name: String,
+    lat: f64,
+    lon: f64,
+    south: f64,
+    north: f64,
+    west: f64,
+    east: f64,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct OsmDiscoveryResult {
+    source_name: String,
+    feature_count: usize,
+    detail: String,
+    geojson: String,
+    output_path: String,
+    place: PlaceFocus,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeocodeRequest { geographic_scope: String }
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,10 +56,247 @@ struct ExecutionResult { layer_name: String, geojson: String, output_path: Strin
 #[derive(Deserialize)]
 struct WorkerEnvelope { r#type: String, payload: serde_json::Value }
 
+fn osm_filter(name: &str, kind: Option<&str>) -> Result<&'static str, String> {
+    let name = name.to_lowercase();
+    let kind = kind.unwrap_or("").to_lowercase();
+    // Bridges before roads so "bridge" / "crossing" never fall through to highway.
+    if name.contains("bridge") || name.contains("crossing") || kind == "bridges" {
+        return Ok("[\"bridge\"]");
+    }
+    if name.contains("building") || name.contains("footprint") || name.contains("built") {
+        return Ok("[\"building\"]");
+    }
+    if name.contains("river") || name.contains("waterway") || name.contains("stream") || name.contains("canal") || name.contains("creek") || name.contains("coast") || kind == "waterways" {
+        return Ok("[\"waterway\"~\"river|canal|stream|tidal_channel|fairway\"]");
+    }
+    if name.contains("water body") || name.contains("waterbody") || (name.contains("water") && name.contains("polygon")) || name.contains("lake") || name.contains("reservoir") {
+        return Ok("[\"natural\"=\"water\"]");
+    }
+    if name.contains("road") || name.contains("street") || name.contains("highway") || name.contains("corridor") || kind == "roads" {
+        // Keep arterials only — residential city-wide queries routinely time out.
+        return Ok("[\"highway\"~\"motorway|trunk|primary|secondary|tertiary\"]");
+    }
+    if name.contains("charger") || name.contains("charging") || name.contains("ev") { return Ok("[\"amenity\"=\"charging_station\"]"); }
+    if name.contains("school") || name.contains("university") || name.contains("college") { return Ok("[\"amenity\"~\"school|university|college\"]"); }
+    if name.contains("hospital") || name.contains("clinic") || name.contains("medical") { return Ok("[\"amenity\"~\"hospital|clinic|doctors\"]"); }
+    if name.contains("pharmacy") { return Ok("[\"amenity\"=\"pharmacy\"]"); }
+    if name.contains("fire station") || name.contains("fire hall") { return Ok("[\"amenity\"=\"fire_station\"]"); }
+    if name.contains("police") { return Ok("[\"amenity\"=\"police\"]"); }
+    if name.contains("library") { return Ok("[\"amenity\"=\"library\"]"); }
+    if name.contains("park") || name.contains("green space") { return Ok("[\"leisure\"=\"park\"]"); }
+    if name.contains("restaurant") || name.contains("cafe") || name.contains("food") { return Ok("[\"amenity\"~\"restaurant|cafe|fast_food\"]"); }
+    if name.contains("bank") || name.contains("atm") { return Ok("[\"amenity\"~\"bank|atm\"]"); }
+    if name.contains("boundary") || name.contains("boundaries") || name.contains("district") || name.contains("neighbourhood") || name.contains("neighborhood") || name.contains("admin") || kind == "boundaries" {
+        return Ok("[\"boundary\"=\"administrative\"]");
+    }
+    if name.contains("land use") || name.contains("landuse") || name.contains("zoning") || kind == "land_use" {
+        return Ok("[\"landuse\"]");
+    }
+    if name.contains("facility") || name.contains("facilities") || name.contains("amenity") || kind == "facilities" {
+        return Ok("[\"amenity\"]");
+    }
+    Err("Heka can inspect OpenStreetMap for roads, bridges, buildings, rivers/waterways, facilities, amenities, parks, administrative boundaries, and land use.".into())
+}
+
+/// Clamp huge admin Nominatim boxes to a workable window around the place center.
+fn clamp_bbox(south: f64, north: f64, west: f64, east: f64, lat: f64, lon: f64) -> (f64, f64, f64, f64) {
+    let max_span = 0.16; // ~18 km — any megacity stays queryable; shrink-retries handle density
+    let mut s = south;
+    let mut n = north;
+    let mut w = west;
+    let mut e = east;
+    if (n - s) > max_span || (e - w) > max_span {
+        let half = max_span / 2.0;
+        s = lat - half;
+        n = lat + half;
+        w = lon - half;
+        e = lon + half;
+    }
+    (s, n, w, e)
+}
+
+fn shrink_bbox(south: f64, north: f64, west: f64, east: f64, factor: f64) -> (f64, f64, f64, f64) {
+    let lat_c = (south + north) / 2.0;
+    let lon_c = (west + east) / 2.0;
+    let half_lat = ((north - south) / 2.0) * factor;
+    let half_lon = ((east - west) / 2.0) * factor;
+    (lat_c - half_lat, lat_c + half_lat, lon_c - half_lon, lon_c + half_lon)
+}
+
+async fn overpass_query(client: &reqwest::Client, query: &str) -> Result<serde_json::Value, String> {
+    let endpoints = [
+        "https://overpass.kumi.systems/api/interpreter",
+        "https://overpass-api.de/api/interpreter",
+        "https://overpass.osm.ch/api/interpreter",
+        "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    ];
+    let mut last_error = String::from("OpenStreetMap search failed on every mirror.");
+    for endpoint in endpoints {
+        match client.post(endpoint)
+            .header("User-Agent", "Heka/0.1 (spatial IDE; https://github.com/c4usal/heka)")
+            .header("Accept", "application/json")
+            .form(&[("data", query)])
+            .timeout(std::time::Duration::from_secs(70))
+            .send().await
+        {
+            Ok(response) => {
+                if !response.status().is_success() {
+                    last_error = format!("Overpass {} returned {}.", endpoint, response.status());
+                    continue;
+                }
+                match response.json::<serde_json::Value>().await {
+                    Ok(payload) => {
+                        // Treat empty + remark as soft failure so callers can shrink bbox / retry.
+                        let empty = payload.get("elements").and_then(|items| items.as_array()).map(|items| items.is_empty()).unwrap_or(true);
+                        if empty {
+                            if let Some(remark) = payload.get("remark").and_then(|value| value.as_str()) {
+                                last_error = format!("Overpass incomplete on {endpoint}: {remark}");
+                                continue;
+                            }
+                        }
+                        return Ok(payload);
+                    }
+                    Err(error) => { last_error = format!("Overpass JSON error from {endpoint}: {error}"); }
+                }
+            }
+            Err(error) => { last_error = format!("Overpass transport error from {endpoint}: {error}"); }
+        }
+    }
+    Err(last_error)
+}
+
+fn parse_overpass_features(payload: &serde_json::Value) -> Vec<serde_json::Value> {
+    payload.get("elements").and_then(|items| items.as_array()).map(|items| items.iter().filter_map(element_to_feature).collect()).unwrap_or_default()
+}
+
+async fn overpass_features(client: &reqwest::Client, query: &str) -> Result<Vec<serde_json::Value>, String> {
+    let payload = overpass_query(client, query).await?;
+    Ok(parse_overpass_features(&payload))
+}
+
+fn feature_family(feature: &serde_json::Value) -> &'static str {
+    let tags = feature.get("properties").cloned().unwrap_or_else(|| serde_json::json!({}));
+    let bridge = tags.get("bridge").and_then(|value| value.as_str()).unwrap_or("");
+    let man_made = tags.get("man_made").and_then(|value| value.as_str()).unwrap_or("");
+    let waterway = tags.get("waterway").and_then(|value| value.as_str()).unwrap_or("");
+    let natural = tags.get("natural").and_then(|value| value.as_str()).unwrap_or("");
+    let highway = tags.get("highway").and_then(|value| value.as_str()).unwrap_or("");
+    if (!bridge.is_empty() && bridge != "no") || man_made == "bridge" { return "bridges"; }
+    if matches!(waterway, "river" | "canal" | "stream" | "drain" | "ditch" | "tidal_channel" | "fairway")
+        || matches!(natural, "water" | "bay" | "coastline")
+    {
+        return "waterways";
+    }
+    if !highway.is_empty() { return "roads"; }
+    "generic"
+}
+
+fn write_geojson(name: &str, features: &[serde_json::Value]) -> Result<(String, String), String> {
+    let collection = serde_json::json!({"type":"FeatureCollection","features":features});
+    let safe_name: String = name.chars().map(|character| if character.is_ascii_alphanumeric() { character } else { '_' }).collect();
+    let output_dir = std::env::var("USERPROFILE").map(std::path::PathBuf::from).unwrap_or_else(|_| std::env::temp_dir()).join("Documents").join("Heka").join("Dataset Resolver");
+    std::fs::create_dir_all(&output_dir).map_err(|error| format!("Could not create Heka dataset directory: {error}"))?;
+    let output_path = output_dir.join(format!("osm_{safe_name}.geojson"));
+    let geojson = serde_json::to_string(&collection).map_err(|error| error.to_string())?;
+    std::fs::write(&output_path, &geojson).map_err(|error| format!("Could not save the OpenStreetMap import: {error}"))?;
+    Ok((geojson, output_path.to_string_lossy().to_string()))
+}
+
+/// Prefer a city/town hit so Lagos / London / anywhere resolve to a usable center, not a huge admin region.
+async fn geocode_scope(client: &reqwest::Client, geographic_scope: &str) -> Result<(PlaceFocus, f64, f64, f64, f64), String> {
+    let place = client.get("https://nominatim.openstreetmap.org/search")
+        .header("User-Agent", "Heka/0.1 (https://github.com/c4usal/heka)")
+        .query(&[
+            ("q", geographic_scope),
+            ("format", "jsonv2"),
+            ("limit", "3"),
+            ("addressdetails", "0"),
+        ])
+        .timeout(std::time::Duration::from_secs(15)).send().await.map_err(|error| format!("Location lookup failed: {error}"))?
+        .json::<serde_json::Value>().await.map_err(|error| format!("Location lookup returned unreadable JSON: {error}"))?;
+    let items = place.as_array().ok_or("Heka could not locate the requested geographic scope.")?;
+    let item = items.iter().find(|candidate| {
+        let kind = candidate.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let class = candidate.get("class").and_then(|v| v.as_str()).unwrap_or("");
+        matches!(kind, "city" | "town" | "municipality" | "suburb" | "neighbourhood" | "administrative")
+            || class == "place"
+            || class == "boundary"
+    }).or_else(|| items.first()).ok_or("Heka could not locate the requested geographic scope.")?;
+    let bounding = item.get("boundingbox").and_then(|value| value.as_array()).ok_or("Heka could not locate the requested geographic scope.")?;
+    let south = bounding.get(0).and_then(|v| v.as_str()).and_then(|v| v.parse::<f64>().ok()).ok_or("Invalid location bounds.")?;
+    let north = bounding.get(1).and_then(|v| v.as_str()).and_then(|v| v.parse::<f64>().ok()).ok_or("Invalid location bounds.")?;
+    let west = bounding.get(2).and_then(|v| v.as_str()).and_then(|v| v.parse::<f64>().ok()).ok_or("Invalid location bounds.")?;
+    let east = bounding.get(3).and_then(|v| v.as_str()).and_then(|v| v.parse::<f64>().ok()).ok_or("Invalid location bounds.")?;
+    let lat = item.get("lat").and_then(|v| v.as_str()).and_then(|v| v.parse::<f64>().ok()).ok_or("Invalid place latitude.")?;
+    let lon = item.get("lon").and_then(|v| v.as_str()).and_then(|v| v.parse::<f64>().ok()).ok_or("Invalid place longitude.")?;
+    let display_name = item.get("display_name").and_then(|v| v.as_str()).unwrap_or(geographic_scope).to_string();
+    let (south, north, west, east) = clamp_bbox(south, north, west, east, lat, lon);
+    Ok((PlaceFocus { display_name, lat, lon, south, north, west, east }, south, north, west, east))
+}
+
+/// Shrink bbox and retry Overpass until features appear — works for any geocoded city.
+async fn overpass_with_bbox_retries(
+    client: &reqwest::Client,
+    mut south: f64,
+    mut north: f64,
+    mut west: f64,
+    mut east: f64,
+    build: impl Fn(f64, f64, f64, f64) -> String + Send,
+) -> Vec<serde_json::Value> {
+    for attempt in 0..4 {
+        let query = build(south, north, west, east);
+        match overpass_features(client, &query).await {
+            Ok(features) if !features.is_empty() => return features,
+            _ => {
+                if attempt == 3 { break; }
+                let shrunk = shrink_bbox(south, north, west, east, 0.65);
+                south = shrunk.0;
+                north = shrunk.1;
+                west = shrunk.2;
+                east = shrunk.3;
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn element_to_feature(element: &serde_json::Value) -> Option<serde_json::Value> {
+    let kind = element.get("type")?.as_str()?;
+    let id = element.get("id")?.as_i64()?;
+    if kind == "node" || element.get("center").is_some() {
+        let (lon, lat) = if kind == "node" {
+            (element.get("lon")?.as_f64()?, element.get("lat")?.as_f64()?)
+        } else {
+            let center = element.get("center")?;
+            (center.get("lon")?.as_f64()?, center.get("lat")?.as_f64()?)
+        };
+        let coordinates = serde_json::json!([lon, lat]);
+        let mut properties = element.get("tags").cloned().unwrap_or_else(|| serde_json::json!({}));
+        if let Some(object) = properties.as_object_mut() {
+            object.insert("osm_type".into(), serde_json::json!(kind));
+            object.insert("osm_id".into(), serde_json::json!(id));
+        }
+        return Some(serde_json::json!({"type":"Feature","properties":properties,"geometry":{"type":"Point","coordinates":coordinates}}));
+    }
+    let points = element.get("geometry").and_then(|value| value.as_array())?;
+    let coordinates: Vec<serde_json::Value> = points.iter().filter_map(|point| Some(serde_json::json!([point.get("lon")?.as_f64()?, point.get("lat")?.as_f64()?]))).collect();
+    if coordinates.len() < 2 { return None; }
+    let closed = coordinates.first() == coordinates.last() && coordinates.len() >= 4;
+    let geometry = if closed {
+        serde_json::json!({"type":"Polygon","coordinates":[coordinates]})
+    } else {
+        serde_json::json!({"type":"LineString","coordinates":coordinates})
+    };
+    let mut properties = element.get("tags").cloned().unwrap_or_else(|| serde_json::json!({}));
+    if let Some(object) = properties.as_object_mut() {
+        object.insert("osm_type".into(), serde_json::json!(kind));
+        object.insert("osm_id".into(), serde_json::json!(id));
+    }
+    Some(serde_json::json!({"type":"Feature","properties":properties,"geometry":geometry}))
+}
+
 #[tauri::command]
 fn runtime_health() -> RuntimeHealth {
-    // The worker process is intentionally owned by the desktop shell. The UI talks to it
-    // through typed commands/events rather than spawning GIS processes directly.
     let launcher = std::env::var("HEKA_QGIS_PYTHON").unwrap_or_else(|_| r"C:\OSGeo4W\bin\python-qgis-ltr.bat".to_string());
     RuntimeHealth { available: std::path::Path::new(&launcher).exists(), backend: "PyQGIS / QGIS Processing".into(), detail: launcher }
 }
@@ -51,7 +311,7 @@ async fn request_groq_planner(request: GroqPlannerRequest) -> Result<serde_json:
         }
         client.post(format!("{base}/v1/chat/completions"))
             .json(&request.body)
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(60))
             .send().await.map_err(|error| format!("Heka planner gateway could not be reached: {error}"))?
     } else {
         let key = std::env::var("HEKA_GROQ_API_KEY")
@@ -71,56 +331,207 @@ async fn request_groq_planner(request: GroqPlannerRequest) -> Result<serde_json:
 }
 
 #[tauri::command]
-async fn discover_osm_dataset(request: OsmDiscoveryRequest) -> Result<OsmDiscoveryResult, String> {
-    let name = request.dataset_name.to_lowercase();
-    let filter = if name.contains("road") || name.contains("street") { "[\"highway\"]" }
-        else if name.contains("charger") || name.contains("charging") { "[\"amenity\"=\"charging_station\"]" }
-        else if name.contains("school") { "[\"amenity\"=\"school\"]" }
-        else if name.contains("hospital") { "[\"amenity\"=\"hospital\"]" }
-        else if name.contains("fire station") { "[\"amenity\"=\"fire_station\"]" }
-        else if name.contains("park") { "[\"leisure\"=\"park\"]" }
-        else { return Err("Heka can currently inspect OpenStreetMap sources for roads, chargers, schools, hospitals, fire stations, and parks.".into()); };
+async fn geocode_place(request: GeocodeRequest) -> Result<PlaceFocus, String> {
     let client = reqwest::Client::new();
-    let place = client.get("https://nominatim.openstreetmap.org/search")
-        .header("User-Agent", "Heka Dataset Resolver/0.1 (https://github.com/c4usal/heka)")
-        .query(&[("q", request.geographic_scope.as_str()), ("format", "jsonv2"), ("limit", "1")])
-        .timeout(std::time::Duration::from_secs(15)).send().await.map_err(|error| format!("Location lookup failed: {error}"))?
-        .json::<serde_json::Value>().await.map_err(|error| format!("Location lookup returned unreadable JSON: {error}"))?;
-    let bounding = place.as_array().and_then(|items| items.first()).and_then(|item| item.get("boundingbox")).and_then(|value| value.as_array()).ok_or("Heka could not locate the requested geographic scope.")?;
-    let south = bounding.get(0).and_then(|v| v.as_str()).ok_or("Invalid location bounds.")?;
-    let north = bounding.get(1).and_then(|v| v.as_str()).ok_or("Invalid location bounds.")?;
-    let west = bounding.get(2).and_then(|v| v.as_str()).ok_or("Invalid location bounds.")?;
-    let east = bounding.get(3).and_then(|v| v.as_str()).ok_or("Invalid location bounds.")?;
-    let query = format!("[out:json][timeout:25];nwr{filter}({south},{west},{north},{east});out geom 1000;");
-    let payload = client.post("https://overpass-api.de/api/interpreter")
-        .header("User-Agent", "Heka Dataset Resolver/0.1 (https://github.com/c4usal/heka)")
-        .form(&[("data", query)]).timeout(std::time::Duration::from_secs(35)).send().await.map_err(|error| format!("OpenStreetMap search failed: {error}"))?
-        .json::<serde_json::Value>().await.map_err(|error| format!("OpenStreetMap returned unreadable JSON: {error}"))?;
-    let elements = payload.get("elements").and_then(|items| items.as_array()).ok_or("OpenStreetMap did not return a feature collection.")?;
-    let features = elements.iter().filter_map(|element| {
-        let kind = element.get("type")?.as_str()?;
-        let id = element.get("id")?.as_i64()?;
-        let coordinates = if kind == "node" {
-            serde_json::json!([element.get("lon")?.as_f64()?, element.get("lat")?.as_f64()?])
-        } else if let Some(points) = element.get("geometry").and_then(|value| value.as_array()) {
-            let coordinates: Vec<serde_json::Value> = points.iter().filter_map(|point| Some(serde_json::json!([point.get("lon")?.as_f64()?, point.get("lat")?.as_f64()?]))).collect();
-            if coordinates.len() < 2 { return None; }
-            serde_json::json!(coordinates)
-        } else { return None; };
-        let geometry = if kind == "node" { serde_json::json!({"type":"Point","coordinates":coordinates}) } else { serde_json::json!({"type":"LineString","coordinates":coordinates}) };
-        let mut properties = element.get("tags").cloned().unwrap_or_else(|| serde_json::json!({}));
-        if let Some(object) = properties.as_object_mut() { object.insert("osm_type".into(), serde_json::json!(kind)); object.insert("osm_id".into(), serde_json::json!(id)); }
-        Some(serde_json::json!({"type":"Feature","properties":properties,"geometry":geometry}))
-    }).collect::<Vec<_>>();
-    if features.is_empty() { return Err("OpenStreetMap found no supported geometries for this search.".into()); }
-    let collection = serde_json::json!({"type":"FeatureCollection","features":features});
-    let safe_name: String = request.dataset_name.chars().map(|character| if character.is_ascii_alphanumeric() { character } else { '_' }).collect();
-    let output_dir = std::env::var("USERPROFILE").map(std::path::PathBuf::from).unwrap_or_else(|_| std::env::temp_dir()).join("Documents").join("Heka").join("Dataset Resolver");
-    std::fs::create_dir_all(&output_dir).map_err(|error| format!("Could not create Heka dataset directory: {error}"))?;
-    let output_path = output_dir.join(format!("osm_{safe_name}.geojson"));
-    let geojson = serde_json::to_string(&collection).map_err(|error| error.to_string())?;
-    std::fs::write(&output_path, &geojson).map_err(|error| format!("Could not save the OpenStreetMap import: {error}"))?;
-    Ok(OsmDiscoveryResult { source_name: "OpenStreetMap / Overpass".into(), feature_count: features.len(), detail: "Imported from a bounded 1,000-feature OpenStreetMap query. Verify completeness and licensing before operational use.".into(), geojson, output_path: output_path.to_string_lossy().to_string() })
+    let (place, _, _, _, _) = geocode_scope(&client, &request.geographic_scope).await?;
+    Ok(place)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeSitingContext {
+    place: PlaceFocus,
+    roads: OsmDiscoveryResult,
+    waterways: OsmDiscoveryResult,
+    bridges: OsmDiscoveryResult,
+    detail: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FacilityGapRequest {
+    geographic_scope: String,
+    #[serde(default)]
+    amenity: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FacilityGapContext {
+    place: PlaceFocus,
+    roads: OsmDiscoveryResult,
+    facilities: OsmDiscoveryResult,
+    detail: String,
+    amenity: String,
+}
+
+#[tauri::command]
+async fn discover_osm_dataset(request: OsmDiscoveryRequest) -> Result<OsmDiscoveryResult, String> {
+    let filter = osm_filter(&request.dataset_name, request.kind.as_deref())?;
+    let client = reqwest::Client::new();
+    let (place, south, north, west, east) = geocode_scope(&client, &request.geographic_scope).await?;
+    let out = if filter.contains("building") { "out center 700;" } else { "out geom 700;" };
+    let features = overpass_with_bbox_retries(&client, south, north, west, east, |s, n, w, e| {
+        format!("[out:json][timeout:45];(way{filter}({s},{w},{n},{e});node{filter}({s},{w},{n},{e}););{out}")
+    }).await;
+    if features.is_empty() {
+        return Err(format!("OpenStreetMap found no geometries for '{}' around {}.", request.dataset_name, place.display_name));
+    }
+    let (geojson, output_path) = write_geojson(&request.dataset_name, &features)?;
+    Ok(OsmDiscoveryResult {
+        source_name: "OpenStreetMap / Overpass".into(),
+        feature_count: features.len(),
+        detail: format!("Imported {} features from a bounded OpenStreetMap query around {}.", features.len(), place.display_name),
+        geojson,
+        output_path,
+        place,
+    })
+}
+
+/// Separate Overpass fetches for roads / water / bridges so dense cities never starve a layer.
+#[tauri::command]
+async fn discover_bridge_siting_context(request: GeocodeRequest) -> Result<BridgeSitingContext, String> {
+    let client = reqwest::Client::new();
+    let (place, south, north, west, east) = geocode_scope(&client, &request.geographic_scope).await?;
+
+    let roads = overpass_with_bbox_retries(&client, south, north, west, east, |s, n, w, e| {
+        format!(
+            "[out:json][timeout:45];\
+             way[\"highway\"~\"motorway|trunk|primary|secondary|tertiary\"]({s},{w},{n},{e});\
+             out geom 700;"
+        )
+    }).await;
+
+    let mut waterways = overpass_with_bbox_retries(&client, south, north, west, east, |s, n, w, e| {
+        format!(
+            "[out:json][timeout:45];(\
+               way[\"waterway\"~\"river|canal|stream|tidal_channel|fairway\"]({s},{w},{n},{e});\
+               way[\"natural\"=\"water\"]({s},{w},{n},{e});\
+             );out geom 500;"
+        )
+    }).await;
+
+    // Coastline fallback for lagoon / harbour cities (Lagos, coastal megacities).
+    if waterways.is_empty() {
+        waterways = overpass_with_bbox_retries(&client, south, north, west, east, |s, n, w, e| {
+            format!(
+                "[out:json][timeout:45];(\
+                   way[\"natural\"=\"coastline\"]({s},{w},{n},{e});\
+                   way[\"waterway\"]({s},{w},{n},{e});\
+                 );out geom 400;"
+            )
+        }).await;
+    }
+
+    let bridges = overpass_with_bbox_retries(&client, south, north, west, east, |s, n, w, e| {
+        format!(
+            "[out:json][timeout:45];(\
+               way[\"bridge\"]({s},{w},{n},{e});\
+               way[\"man_made\"=\"bridge\"]({s},{w},{n},{e});\
+               node[\"man_made\"=\"bridge\"]({s},{w},{n},{e});\
+               way[\"highway\"][\"bridge\"~\"yes|movable|cantilever|aqueduct\"]({s},{w},{n},{e});\
+             );out geom 500;"
+        )
+    }).await;
+
+    if roads.is_empty() {
+        return Err(format!("OpenStreetMap returned no arterial roads around {}.", place.display_name));
+    }
+    if waterways.is_empty() {
+        return Err(format!("OpenStreetMap returned no waterways/coastline around {} — cannot site a bridge without a water corridor.", place.display_name));
+    }
+
+    let (roads_geojson, roads_path) = write_geojson("bridge_context_roads", &roads)?;
+    let (water_geojson, water_path) = write_geojson("bridge_context_waterways", &waterways)?;
+    let (bridge_geojson, bridge_path) = write_geojson("bridge_context_bridges", &bridges)?;
+    let detail = format!(
+        "Bridge context around {}: {} arterial roads, {} water segments, {} existing bridges (layers fetched separately).",
+        place.display_name, roads.len(), waterways.len(), bridges.len()
+    );
+    Ok(BridgeSitingContext {
+        place: place.clone(),
+        roads: OsmDiscoveryResult { source_name: "OpenStreetMap / Overpass".into(), feature_count: roads.len(), detail: detail.clone(), geojson: roads_geojson, output_path: roads_path, place: place.clone() },
+        waterways: OsmDiscoveryResult { source_name: "OpenStreetMap / Overpass".into(), feature_count: waterways.len(), detail: detail.clone(), geojson: water_geojson, output_path: water_path, place: place.clone() },
+        bridges: OsmDiscoveryResult { source_name: "OpenStreetMap / Overpass".into(), feature_count: bridges.len(), detail: detail.clone(), geojson: bridge_geojson, output_path: bridge_path, place },
+        detail,
+    })
+}
+
+fn facility_query_parts(amenity: &str, south: f64, north: f64, west: f64, east: f64) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if amenity == "park" {
+        parts.push(format!("node[\"leisure\"=\"park\"]({south},{west},{north},{east})"));
+        parts.push(format!("way[\"leisure\"=\"park\"]({south},{west},{north},{east})"));
+        parts.push(format!("node[\"leisure\"=\"playground\"]({south},{west},{north},{east})"));
+        parts.push(format!("way[\"natural\"=\"wetland\"]({south},{west},{north},{east})"));
+    } else if amenity == "volcano" {
+        parts.push(format!("node[\"natural\"=\"volcano\"]({south},{west},{north},{east})"));
+        parts.push(format!("way[\"natural\"=\"volcano\"]({south},{west},{north},{east})"));
+    } else if amenity == "airport" {
+        parts.push(format!("node[\"aeroway\"=\"aerodrome\"]({south},{west},{north},{east})"));
+        parts.push(format!("way[\"aeroway\"=\"aerodrome\"]({south},{west},{north},{east})"));
+        parts.push(format!("node[\"amenity\"=\"airport\"]({south},{west},{north},{east})"));
+    } else if amenity.contains('|') {
+        parts.push(format!("node[\"amenity\"~\"{amenity}\"]({south},{west},{north},{east})"));
+        parts.push(format!("way[\"amenity\"~\"{amenity}\"]({south},{west},{north},{east})"));
+        if amenity.contains("bus_station") || amenity.contains("ferry_terminal") {
+            parts.push(format!("node[\"railway\"=\"station\"]({south},{west},{north},{east})"));
+            parts.push(format!("way[\"railway\"=\"station\"]({south},{west},{north},{east})"));
+        }
+    } else {
+        parts.push(format!("node[\"amenity\"=\"{amenity}\"]({south},{west},{north},{east})"));
+        parts.push(format!("way[\"amenity\"=\"{amenity}\"]({south},{west},{north},{east})"));
+        if amenity == "hospital" {
+            parts.push(format!("node[\"healthcare\"=\"hospital\"]({south},{west},{north},{east})"));
+            parts.push(format!("way[\"healthcare\"=\"hospital\"]({south},{west},{north},{east})"));
+        }
+        if amenity == "charging_station" {
+            parts.push(format!("node[\"charging_station\"=\"yes\"]({south},{west},{north},{east})"));
+        }
+    }
+    parts.join(";")
+}
+
+/// Separate road + facility fetches so any city can return both layers.
+#[tauri::command]
+async fn discover_facility_gap_context(request: FacilityGapRequest) -> Result<FacilityGapContext, String> {
+    let amenity = request.amenity.unwrap_or_else(|| "hospital".into());
+    let client = reqwest::Client::new();
+    let (place, south, north, west, east) = geocode_scope(&client, &request.geographic_scope).await?;
+
+    let roads = overpass_with_bbox_retries(&client, south, north, west, east, |s, n, w, e| {
+        format!(
+            "[out:json][timeout:45];\
+             way[\"highway\"~\"motorway|trunk|primary|secondary|tertiary\"]({s},{w},{n},{e});\
+             out geom 700;"
+        )
+    }).await;
+
+    let facilities = overpass_with_bbox_retries(&client, south, north, west, east, |s, n, w, e| {
+        let union = facility_query_parts(&amenity, s, n, w, e);
+        format!("[out:json][timeout:45];({union};);out center;")
+    }).await;
+
+    if roads.is_empty() {
+        return Err(format!("OpenStreetMap returned no arterial roads around {}.", place.display_name));
+    }
+    if facilities.is_empty() {
+        return Err(format!("OpenStreetMap returned no '{amenity}' features around {}.", place.display_name));
+    }
+
+    let (roads_geojson, roads_path) = write_geojson("facility_context_roads", &roads)?;
+    let (facilities_geojson, facilities_path) = write_geojson("facility_context_facilities", &facilities)?;
+    let detail = format!(
+        "Facility context around {}: {} road features, {} {} features (layers fetched separately).",
+        place.display_name, roads.len(), facilities.len(), amenity
+    );
+    Ok(FacilityGapContext {
+        place: place.clone(),
+        roads: OsmDiscoveryResult { source_name: "OpenStreetMap / Overpass".into(), feature_count: roads.len(), detail: detail.clone(), geojson: roads_geojson, output_path: roads_path, place: place.clone() },
+        facilities: OsmDiscoveryResult { source_name: "OpenStreetMap / Overpass".into(), feature_count: facilities.len(), detail: detail.clone(), geojson: facilities_geojson, output_path: facilities_path, place },
+        detail,
+        amenity,
+    })
 }
 
 #[tauri::command]
@@ -163,7 +574,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .invoke_handler(tauri::generate_handler![runtime_health, request_groq_planner, discover_osm_dataset, execute_spatial_plan])
+        .invoke_handler(tauri::generate_handler![runtime_health, request_groq_planner, geocode_place, discover_osm_dataset, discover_bridge_siting_context, discover_facility_gap_context, execute_spatial_plan])
         .run(tauri::generate_context!())
         .expect("error while running Heka");
 }

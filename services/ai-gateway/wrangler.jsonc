@@ -5,6 +5,7 @@
   "compatibility_date": "2026-07-21",
   "workers_dev": true,
   "vars": {
+    "OPENAI_MODEL": "gpt-4.1-mini",
     "GROQ_MODEL": "openai/gpt-oss-120b"
   },
   "observability": {

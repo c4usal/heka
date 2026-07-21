@@ -3,7 +3,7 @@
 ## Prerequisites
 
 1. Install **QGIS LTR** with OSGeo4W. Heka detects the standard launcher automatically at `C:\OSGeo4W\bin\python-qgis-ltr.bat`.
-2. No local AI runtime, Docker container, or per-machine provider key is required. Heka uses its hosted gateway with Groq's strict JSON-schema-capable `openai/gpt-oss-120b` model by default.
+2. No local AI runtime, Docker container, or per-machine provider key is required. Heka uses its hosted gateway with **OpenAI primary** (`gpt-4.1-mini`), then Groq (`openai/gpt-oss-120b`), then optional Gemini. The gateway also pulls free DuckDuckGo + Wikipedia context before planning.
 3. Keep an internet connection for the first Calgary run. Heka caches the public City of Calgary feature layers locally after downloading them.
 
 ## Start the app

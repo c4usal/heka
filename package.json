@@ -9,7 +9,11 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "tauri:build:windows": "scripts\\build-tauri.cmd"
+    "tauri:build:windows": "scripts\\build-tauri.cmd",
+    "web:install": "npm install --prefix services/heka-web",
+    "web:build": "set HEKA_CESIUM_CDN=1&& tsc -b && vite build",
+    "web:deploy": "npm run web:build && npm run web:install && npm run deploy --prefix services/heka-web",
+    "web:dev": "npm run web:build && npm run dev --prefix services/heka-web"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.8.0",
@@ -25,6 +29,7 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.2.0",
+    "@types/node": "^26.1.1",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",
