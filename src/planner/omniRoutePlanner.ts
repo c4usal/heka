@@ -2,6 +2,7 @@ import { HEKA_PLANNER_SYSTEM_PROMPT } from "./plannerPrompt";
 import { plannerJsonSchema, plannerOutputSchema, type PlannerOutput } from "./plannerSchema";
 import { invoke } from "@tauri-apps/api/core";
 import { plannerDatasetContext } from "../datasets/datasetCatalog";
+import { hostedPlannerGatewayUrl } from "../config/aiGateway";
 
 const endpoint = (import.meta.env.VITE_OMNIROUTE_BASE_URL ?? "http://localhost:20128/v1").replace(/\/$/, "");
 // Keep Heka on one direct, structured-output-capable model instead of an
@@ -92,7 +93,7 @@ async function requestPlan(question: string, repair?: string): Promise<PlannerOu
     const catalog = `\n\nAVAILABLE LOCAL DATASET CATALOG:\n${plannerDatasetContext()}`;
     const body = { model: "__TAURI_INTERNALS__" in window ? directModel : model, temperature: 0.1, stream: false, max_tokens: 1800, response_format: { type: "json_schema", json_schema: plannerJsonSchema }, messages: [{ role: "system", content: `${HEKA_PLANNER_SYSTEM_PROMPT}${catalog}` }, { role: "user", content: repair ? `Original question: ${question}\n\nThe previous response failed validation: ${repair}\nReturn a corrected JSON object only.` : question }] };
     const payload = ("__TAURI_INTERNALS__" in window
-      ? await invoke<ChatCompletion>("request_groq_planner", { request: { body } })
+      ? await invoke<ChatCompletion>("request_groq_planner", { request: { body, gatewayUrl: hostedPlannerGatewayUrl } })
       : await (async () => { const response = await fetch(`${endpoint}/chat/completions`, { method: "POST", signal: controller.signal, headers: { "Content-Type": "application/json", ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}) }, body: JSON.stringify(body) }); const value = await response.json().catch(() => { throw new PlannerRequestError("OmniRoute returned an unreadable response."); }) as ChatCompletion; if (!response.ok) throw new PlannerRequestError(value.error?.message ?? `OmniRoute request failed (${response.status}).`); return value; })()) as ChatCompletion;
     const content = payload.choices?.[0]?.message?.content;
     if (!content?.trim()) throw new PlannerRequestError("OmniRoute returned an empty planning result.");
@@ -101,9 +102,9 @@ async function requestPlan(question: string, repair?: string): Promise<PlannerOu
     if (!result.success) throw new PlannerRequestError(`Planner schema validation failed: ${result.error.issues.map((issue) => issue.path.join(".") || issue.message).join(", ")}`);
     return result.data;
   } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") throw new PlannerRequestError("OmniRoute timed out. Check that the local gateway is running.");
+    if (error instanceof DOMException && error.name === "AbortError") throw new PlannerRequestError("The Heka planner timed out. Please try again.");
     if (error instanceof PlannerRequestError) throw error;
-    throw new PlannerRequestError("OmniRoute is offline. Start the local gateway with `omniroute`, connect a provider in its dashboard at http://localhost:20128, then try again.");
+    throw new PlannerRequestError("The Heka planner is unavailable. Check your internet connection and try again.");
   } finally { window.clearTimeout(timeout); }
 }
 

@@ -3,7 +3,7 @@
 ## Prerequisites
 
 1. Install **QGIS LTR** with OSGeo4W. Heka detects the standard launcher automatically at `C:\OSGeo4W\bin\python-qgis-ltr.bat`.
-2. Configure a planner key for the desktop runtime once: set the Windows user environment variable `HEKA_GROQ_API_KEY` to a Groq API key. Heka uses Groq's strict JSON-schema-capable `openai/gpt-oss-120b` model by default. No local Docker or OmniRoute process is required.
+2. No local AI runtime, Docker container, or per-machine provider key is required. Heka uses its hosted gateway with Groq's strict JSON-schema-capable `openai/gpt-oss-120b` model by default.
 3. Keep an internet connection for the first Calgary run. Heka caches the public City of Calgary feature layers locally after downloading them.
 
 ## Start the app
@@ -40,7 +40,7 @@ The result is `exports\fire_station_candidates.geojson`, in WGS84 / CRS84 and re
 - The demonstration ranks community-area coverage gaps with a **5 km straight-line buffer**. It is not road-network travel-time analysis and must not be treated as a city planning recommendation.
 - The first run downloads public City of Calgary layers; later runs use the local cache.
 - The current local runtime supports a data-validated facility-coverage analysis family. Other questions are planned honestly, but Heka identifies missing datasets instead of fabricating a map result.
-- The model key stays in the Tauri desktop shell and is never sent to the browser UI or PyQGIS worker.
+- The provider key is held only as a Cloudflare Worker secret; it is never sent to the browser UI or PyQGIS worker.
 
 ## 60-second demo script
 

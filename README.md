@@ -60,7 +60,7 @@ The current demonstration uses a transparent 5 km straight-line coverage proxy, 
 
 ### Local runtime setup
 
-Install QGIS LTR through OSGeo4W, then run Heka normally. The expected launcher is `C:\OSGeo4W\bin\python-qgis-ltr.bat`; override it with `HEKA_QGIS_PYTHON` when QGIS is installed elsewhere. Set `HEKA_GROQ_API_KEY` as a Windows user environment variable for planner access, and `HEKA_DATA_DIR` to choose the directory used for locally cached demo data and exported GeoJSON. The worker never receives executable code from the planner: it compiles only a reviewed, capability-checked Spatial DSL into QGIS Processing calls in `worker/heka_worker.py`.
+Install QGIS LTR through OSGeo4W, then run Heka normally. The expected launcher is `C:\OSGeo4W\bin\python-qgis-ltr.bat`; override it with `HEKA_QGIS_PYTHON` when QGIS is installed elsewhere. Heka uses its hosted planner gateway, so no local model service or provider key is required. Set `HEKA_DATA_DIR` to choose the directory used for locally cached demo data and exported GeoJSON. The worker never receives executable code from the planner: it compiles only a reviewed, capability-checked Spatial DSL into QGIS Processing calls in `worker/heka_worker.py`.
 
 ## Repository layout
 

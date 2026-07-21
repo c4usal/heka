@@ -12,7 +12,7 @@ struct ExecutionRequest { data_directory: Option<String>, output_path: Option<St
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct GroqPlannerRequest { body: serde_json::Value }
+struct GroqPlannerRequest { body: serde_json::Value, gateway_url: Option<String> }
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,14 +35,25 @@ fn runtime_health() -> RuntimeHealth {
 
 #[tauri::command]
 async fn request_groq_planner(request: GroqPlannerRequest) -> Result<serde_json::Value, String> {
-    let key = std::env::var("HEKA_GROQ_API_KEY")
-        .map_err(|_| "No secure Groq key is configured. Set HEKA_GROQ_API_KEY for the Heka desktop runtime.".to_string())?;
-    let response = reqwest::Client::new()
-        .post("https://api.groq.com/openai/v1/chat/completions")
-        .bearer_auth(key)
-        .json(&request.body)
-        .timeout(std::time::Duration::from_secs(30))
-        .send().await.map_err(|error| format!("Groq could not be reached: {error}"))?;
+    let client = reqwest::Client::new();
+    let response = if let Some(gateway_url) = request.gateway_url.as_deref() {
+        let base = gateway_url.trim_end_matches('/');
+        if !base.starts_with("https://") || !base.ends_with(".workers.dev") {
+            return Err("The configured Heka planner gateway is invalid.".to_string());
+        }
+        client.post(format!("{base}/v1/chat/completions"))
+            .json(&request.body)
+            .timeout(std::time::Duration::from_secs(30))
+            .send().await.map_err(|error| format!("Heka planner gateway could not be reached: {error}"))?
+    } else {
+        let key = std::env::var("HEKA_GROQ_API_KEY")
+            .map_err(|_| "No secure planner key is configured.".to_string())?;
+        client.post("https://api.groq.com/openai/v1/chat/completions")
+            .bearer_auth(key)
+            .json(&request.body)
+            .timeout(std::time::Duration::from_secs(30))
+            .send().await.map_err(|error| format!("Groq could not be reached: {error}"))?
+    };
     let status = response.status();
     let payload = response.json::<serde_json::Value>().await.map_err(|error| format!("Groq returned unreadable JSON: {error}"))?;
     if !status.is_success() {
