@@ -1,4 +1,4 @@
-import { ArrowUp, LoaderCircle, Play, Sparkles } from "lucide-react";
+import { ArrowUp, ChevronRight, CircleAlert, Cpu, LoaderCircle, MapPinned, Play, Sparkles } from "lucide-react";
 import { useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { executeFireStationAnalysis, type ExecutionProgress } from "../../execution/pyqgisExecution";
@@ -9,16 +9,35 @@ import { useWorkspaceStore } from "../../stores/useWorkspaceStore";
 const calgaryDemoQuestion = "Where should Calgary build another fire station?";
 
 export function PlannerComposer() {
-  const [question, setQuestion] = useState(calgaryDemoQuestion);
+  const [question, setQuestion] = useState("");
+  const [submittedQuestion, setSubmittedQuestion] = useState<string>();
   const { planner, execution, beginPlanning, applyPlan, failPlanning, completeTimelineStep, beginExecution, updateExecution, completeExecution, failExecution } = useWorkspaceStore();
-  const submit = async () => { if (!question.trim() || planner.status === "planning") return; beginPlanning();
-    try { const output = await planWithOmniRoute(question); applyPlan(transformPlannerOutput(question, output)); [0, 1, 2, 3, 4, 5, 6].forEach((index) => window.setTimeout(() => completeTimelineStep(index), index * 260)); }
+  const submit = async () => {
+    const prompt = question.trim();
+    if (!prompt || planner.status === "planning") return;
+    setSubmittedQuestion(prompt); setQuestion(""); beginPlanning();
+    try { const output = await planWithOmniRoute(prompt); applyPlan(transformPlannerOutput(prompt, output)); [0, 1, 2, 3, 4, 5, 6].forEach((index) => window.setTimeout(() => completeTimelineStep(index), index * 180)); }
     catch (error) { failPlanning(error instanceof Error ? error.message : "The planner failed unexpectedly."); }
   };
-  const execute = async () => { beginExecution(); let unlisten: (() => void) | undefined;
+  const execute = async () => {
+    beginExecution(); let unlisten: (() => void) | undefined;
     try { unlisten = await listen<ExecutionProgress>("heka://execution-progress", (event) => updateExecution(event.payload.stage, event.payload.percent, event.payload.detail)); completeExecution(await executeFireStationAnalysis()); }
     catch (error) { failExecution(error instanceof Error ? error.message : "PyQGIS execution failed."); } finally { unlisten?.(); }
   };
-  const canRunVerifiedDemo = planner.plan || question === calgaryDemoQuestion;
-  return <div className="planner-composer"><Sparkles size={16} /><textarea aria-label="Spatial question" value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submit(); } }} /><button onClick={() => void submit()} disabled={planner.status === "planning"} title="Plan question">{planner.status === "planning" ? <LoaderCircle className="spin" size={17} /> : <ArrowUp size={17} />}</button><small>{planner.status === "planning" ? "OmniRoute is constructing a spatial plan..." : "Enter to plan · JSON-validated OmniRoute workflow"}</small>{canRunVerifiedDemo && <button className="execute-button" onClick={() => void execute()} disabled={execution.status === "running"}><Play size={13} /> {execution.status === "running" ? `${execution.progress}% ${execution.stage ?? "running"}` : planner.plan ? "Run Calgary analysis" : "Run verified Calgary demo"}</button>}{planner.error && <p role="alert">{planner.error}</p>}{execution.error && <p role="alert">{execution.error}</p>}</div>;
+  const plan = planner.plan;
+  return <aside className="chat-panel">
+    <header className="chat-header"><div><Sparkles size={15} /><span>New agent</span></div><button>Auto <ChevronRight size={13} /></button></header>
+    <div className="chat-thread">
+      {!submittedQuestion && !plan && <div className="chat-welcome"><div className="welcome-mark"><MapPinned size={20} /></div><h1>Ask Earth</h1><p>Plan, inspect, and run spatial analysis without opening a GIS tool.</p><button onClick={() => setQuestion(calgaryDemoQuestion)}>Try the Calgary fire-station study</button></div>}
+      {submittedQuestion && <article className="user-message">{submittedQuestion}</article>}
+      {planner.status === "planning" && <article className="assistant-message thinking-live"><LoaderCircle className="spin" size={15} /> Building a spatial plan…</article>}
+      {planner.error && <article className="chat-error"><CircleAlert size={15} /><span>{planner.error}</span></article>}
+      {plan && <article className="assistant-message"><p className="assistant-kicker"><Sparkles size={13} /> Spatial plan ready</p><h2>{plan.objective}</h2><p>{plan.workflowSummary}</p><div className="plan-meta"><span>{plan.location ?? plan.geographicScope}</span><span>{plan.confidence}% confidence</span></div>
+        <details className="thinking-details"><summary><Cpu size={14} /><span>Thinking</span><small>{plan.dsl.length} spatial steps</small><ChevronRight size={14} /></summary><div className="thinking-body"><p><b>Datasets</b>{plan.requiredDatasets.map((dataset) => <span key={dataset.name}>{dataset.name}</span>)}</p><p><b>Workflow</b>{plan.dsl.map((step) => <span key={step.id}>{step.operation} — {step.label}</span>)}</p><p><b>Assumptions</b>{plan.assumptions.map((assumption) => <span key={assumption}>{assumption}</span>)}</p></div></details>
+        <button className="run-analysis" onClick={() => void execute()} disabled={execution.status === "running"}><Play size={14} /> {execution.status === "running" ? `${execution.progress}% ${execution.stage ?? "Running"}` : "Run this analysis"}</button>
+        {execution.error && <p className="inline-error">{execution.error}</p>}
+      </article>}
+    </div>
+    <form className="chat-composer" onSubmit={(event) => { event.preventDefault(); void submit(); }}><textarea aria-label="Spatial question" value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="Ask a question about the physical world…" rows={3} /><div><span>Enter to send · Shift+Enter for a new line</span><button type="submit" disabled={!question.trim() || planner.status === "planning"} title="Plan question"><ArrowUp size={17} /></button></div></form>
+  </aside>;
 }

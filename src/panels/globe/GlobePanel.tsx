@@ -2,11 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import { Cartesian3, Color, ColorMaterialProperty, ConstantProperty, EllipsoidTerrainProvider, GeoJsonDataSource, ImageryLayer, JulianDate, OpenStreetMapImageryProvider, ScreenSpaceEventType, Viewer } from "cesium";
 import "./mapViewer.css";
 import { Eye, EyeOff, Layers } from "lucide-react";
-import { PlannerComposer } from "../planner/PlannerComposer";
 import { useWorkspaceStore } from "../../stores/useWorkspaceStore";
 import type { MapLayer, MapLayerKind } from "../../types/workspace";
 
 type SourceRecord = { layer: MapLayer; source: GeoJsonDataSource; visible: boolean };
+// The composer now lives in the dedicated Cursor-style chat pane. Keeping this
+// inert node preserves the map panel's existing DOM boundary during migration.
+const PlannerComposer = () => null;
 const styles: Record<MapLayerKind, { fill: Color; stroke: Color; marker: Color; size: number }> = {
   stations: { fill: Color.fromCssColorString("#22d3ee").withAlpha(0.18), stroke: Color.fromCssColorString("#0891b2"), marker: Color.fromCssColorString("#06b6d4"), size: 10 },
   coverage: { fill: Color.fromCssColorString("#34d399").withAlpha(0.18), stroke: Color.fromCssColorString("#059669"), marker: Color.fromCssColorString("#059669"), size: 8 },
