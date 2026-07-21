@@ -6,12 +6,12 @@ import { useState } from "react";
 function EmptyInspector() { const cards = [["Intent", FileText, "No objective selected"], ["Constraints", CheckSquare, "No constraints extracted"], ["Selected datasets", ListTree, "Choose datasets to begin"], ["Workflow graph", Braces, "Awaiting planner output"], ["Planner notes", NotebookPen, "Planner ready"], ["Execution status", PlayCircle, "Runtime ready"]] as const; return <>{cards.map(([title, Icon, placeholder]) => <section className="inspector-card" key={title}><div><Icon size={14} /><h2>{title}</h2></div><p>{placeholder}</p></section>)}</>; }
 
 export function ReasoningInspectorPanel() {
-  const planner = useWorkspaceStore((state) => state.planner); const execution = useWorkspaceStore((state) => state.execution); const datasetResolutions = useWorkspaceStore((state) => state.datasetResolutions); const plan = planner.plan;
+  const planner = useWorkspaceStore((state) => state.planner); const execution = useWorkspaceStore((state) => state.execution); const datasetResolutions = useWorkspaceStore((state) => state.datasetResolutions); const addResolvedMapLayer = useWorkspaceStore((state) => state.addResolvedMapLayer); const plan = planner.plan;
   const [discovery, setDiscovery] = useState<Record<string, string>>({});
   const inspectSource = async (datasetName: string) => {
     if (!plan) return;
     setDiscovery((current) => ({ ...current, [datasetName]: "Searching OpenStreetMap…" }));
-    try { const result = await discoverOpenStreetMapDataset(datasetName, plan.geographicScope); setDiscovery((current) => ({ ...current, [datasetName]: `${result.featureCount.toLocaleString()} features found via ${result.sourceName}.` })); }
+    try { const result = await discoverOpenStreetMapDataset(datasetName, plan.geographicScope); addResolvedMapLayer({ id: `osm-${datasetName.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`, name: `OSM: ${datasetName}`, kind: "generic", geojson: result.geojson, featureCount: result.featureCount, outputPath: result.outputPath }); setDiscovery((current) => ({ ...current, [datasetName]: `${result.featureCount.toLocaleString()} features imported and added to the globe.` })); }
     catch (error) { setDiscovery((current) => ({ ...current, [datasetName]: error instanceof Error ? error.message : "Source discovery failed." })); }
   };
   return <aside className="inspector-panel"><header><span>REASONING INSPECTOR</span><strong>{planner.status === "planning" ? "Planning spatial workflow" : plan ? "Validated spatial plan" : "Workspace context"}</strong></header>{!plan ? <EmptyInspector /> : <>

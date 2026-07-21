@@ -48,7 +48,7 @@ export function resolvePlanDatasets(plan: PlannerPlan): DatasetResolution[] {
   });
 }
 
-export type OpenStreetMapDiscovery = { sourceName: string; featureCount: number; detail: string };
+export type OpenStreetMapDiscovery = { sourceName: string; featureCount: number; detail: string; geojson: string; outputPath: string };
 
 /** User-triggered discovery only: public Overpass must not be queried in bulk. */
 export async function discoverOpenStreetMapDataset(datasetName: string, geographicScope: string): Promise<OpenStreetMapDiscovery> {

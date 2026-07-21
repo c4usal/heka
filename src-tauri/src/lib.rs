@@ -20,7 +20,7 @@ struct OsmDiscoveryRequest { dataset_name: String, geographic_scope: String }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct OsmDiscoveryResult { source_name: String, feature_count: usize, detail: String }
+struct OsmDiscoveryResult { source_name: String, feature_count: usize, detail: String, geojson: String, output_path: String }
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -91,13 +91,36 @@ async fn discover_osm_dataset(request: OsmDiscoveryRequest) -> Result<OsmDiscove
     let north = bounding.get(1).and_then(|v| v.as_str()).ok_or("Invalid location bounds.")?;
     let west = bounding.get(2).and_then(|v| v.as_str()).ok_or("Invalid location bounds.")?;
     let east = bounding.get(3).and_then(|v| v.as_str()).ok_or("Invalid location bounds.")?;
-    let query = format!("[out:json][timeout:25];nwr{filter}({south},{west},{north},{east});out center;");
+    let query = format!("[out:json][timeout:25];nwr{filter}({south},{west},{north},{east});out geom 1000;");
     let payload = client.post("https://overpass-api.de/api/interpreter")
         .header("User-Agent", "Heka Dataset Resolver/0.1 (https://github.com/c4usal/heka)")
         .form(&[("data", query)]).timeout(std::time::Duration::from_secs(35)).send().await.map_err(|error| format!("OpenStreetMap search failed: {error}"))?
         .json::<serde_json::Value>().await.map_err(|error| format!("OpenStreetMap returned unreadable JSON: {error}"))?;
-    let count = payload.get("elements").and_then(|items| items.as_array()).map_or(0, Vec::len);
-    Ok(OsmDiscoveryResult { source_name: "OpenStreetMap / Overpass".into(), feature_count: count, detail: "Preview only: select an approved source before importing it into the project.".into() })
+    let elements = payload.get("elements").and_then(|items| items.as_array()).ok_or("OpenStreetMap did not return a feature collection.")?;
+    let features = elements.iter().filter_map(|element| {
+        let kind = element.get("type")?.as_str()?;
+        let id = element.get("id")?.as_i64()?;
+        let coordinates = if kind == "node" {
+            serde_json::json!([element.get("lon")?.as_f64()?, element.get("lat")?.as_f64()?])
+        } else if let Some(points) = element.get("geometry").and_then(|value| value.as_array()) {
+            let coordinates: Vec<serde_json::Value> = points.iter().filter_map(|point| Some(serde_json::json!([point.get("lon")?.as_f64()?, point.get("lat")?.as_f64()?]))).collect();
+            if coordinates.len() < 2 { return None; }
+            serde_json::json!(coordinates)
+        } else { return None; };
+        let geometry = if kind == "node" { serde_json::json!({"type":"Point","coordinates":coordinates}) } else { serde_json::json!({"type":"LineString","coordinates":coordinates}) };
+        let mut properties = element.get("tags").cloned().unwrap_or_else(|| serde_json::json!({}));
+        if let Some(object) = properties.as_object_mut() { object.insert("osm_type".into(), serde_json::json!(kind)); object.insert("osm_id".into(), serde_json::json!(id)); }
+        Some(serde_json::json!({"type":"Feature","properties":properties,"geometry":geometry}))
+    }).collect::<Vec<_>>();
+    if features.is_empty() { return Err("OpenStreetMap found no supported geometries for this search.".into()); }
+    let collection = serde_json::json!({"type":"FeatureCollection","features":features});
+    let safe_name: String = request.dataset_name.chars().map(|character| if character.is_ascii_alphanumeric() { character } else { '_' }).collect();
+    let output_dir = std::env::var("USERPROFILE").map(std::path::PathBuf::from).unwrap_or_else(|_| std::env::temp_dir()).join("Documents").join("Heka").join("Dataset Resolver");
+    std::fs::create_dir_all(&output_dir).map_err(|error| format!("Could not create Heka dataset directory: {error}"))?;
+    let output_path = output_dir.join(format!("osm_{safe_name}.geojson"));
+    let geojson = serde_json::to_string(&collection).map_err(|error| error.to_string())?;
+    std::fs::write(&output_path, &geojson).map_err(|error| format!("Could not save the OpenStreetMap import: {error}"))?;
+    Ok(OsmDiscoveryResult { source_name: "OpenStreetMap / Overpass".into(), feature_count: features.len(), detail: "Imported from a bounded 1,000-feature OpenStreetMap query. Verify completeness and licensing before operational use.".into(), geojson, output_path: output_path.to_string_lossy().to_string() })
 }
 
 #[tauri::command]

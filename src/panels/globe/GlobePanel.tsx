@@ -20,6 +20,7 @@ export function GlobePanel() {
   const sources = useRef<SourceRecord[]>([]);
   const selectedEntity = useRef<any>();
   const result = useWorkspaceStore((state) => state.execution.result);
+  const resolvedMapLayers = useWorkspaceStore((state) => state.resolvedMapLayers);
   const selectMapFeature = useWorkspaceStore((state) => state.selectMapFeature);
   const [error, setError] = useState<string>();
   const [layers, setLayers] = useState<SourceRecord[]>([]);
@@ -61,9 +62,10 @@ export function GlobePanel() {
   }, [selectMapFeature]);
 
   useEffect(() => {
-    if (!viewer.current || !result) return;
+    if (!viewer.current || (!result && resolvedMapLayers.length === 0)) return;
     viewer.current.dataSources.removeAll(); sources.current = []; setLayers([]); selectMapFeature();
-    const mapLayers = result.mapLayers?.length ? result.mapLayers : [{ id: "candidates", name: result.layerName, kind: "candidates" as const, geojson: result.geojson, featureCount: result.featureCount, outputPath: result.outputPath }];
+    const executionLayers = !result ? [] : result.mapLayers?.length ? result.mapLayers : [{ id: "candidates", name: result.layerName, kind: "candidates" as const, geojson: result.geojson, featureCount: result.featureCount, outputPath: result.outputPath }];
+    const mapLayers = [...resolvedMapLayers, ...executionLayers];
     void Promise.all(mapLayers.map(async (layer) => {
       const style = styles[layer.kind];
       const source = await GeoJsonDataSource.load(JSON.parse(layer.geojson), { clampToGround: true, fill: style.fill, stroke: style.stroke, strokeWidth: 1.5, markerColor: style.marker, markerSize: style.size });
@@ -80,7 +82,7 @@ export function GlobePanel() {
       sources.current = records; setLayers(records);
       void viewer.current?.flyTo(records.find((record) => record.layer.kind === "gaps")?.source ?? records[0].source, { duration: 1.1 });
     }).catch(() => setError("Heka could not display the generated QGIS GeoJSON layers."));
-  }, [result, selectMapFeature]);
+  }, [result, resolvedMapLayers, selectMapFeature]);
 
   const toggleLayer = (id: string) => setLayers((current) => current.map((record) => {
     if (record.layer.id !== id) return record;
